@@ -1,0 +1,33 @@
+run:
+  id: dev-r1-baseline
+  output_root: runs
+  seed: 42
+scenario:
+  mode: development
+  climate_scenario: ssp245
+  member: r1i1p1f2
+data:
+  gcm_file: data/UKESM1_ssp245_r1i1p1f2_tasmax_hurs_pr_lowres_SEA_2015_2025.nc
+  era5_file: data/ERA5_daily_tasmax_hurs_pr_heatindex_native_025deg_SEA_2015_2025.nc
+  input_channels: [tasmax_gcm, hurs_gcm, pr_gcm]
+  target_channels: [tasmax_era5, hurs_era5, pr_era5]
+periods:
+  train: [2015-01-01, 2022-12-31]
+  validation: [2023-01-01, 2023-12-31]
+  test: [2024-01-01, 2025-12-31]
+preprocessing:
+  precipitation_transform: log1p
+model:
+  class_path: truss_downscaling.models.residual_unet.ResidualUNet
+  parameters:
+    in_channels: 3
+    out_channels: 3
+    depth: 4
+    base_width: 64
+training:
+  epochs: 30
+  batch_size: 16
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  ssim_alpha: 0.84
+  device: auto

@@ -1,0 +1,21 @@
+run:
+  id: future-r1
+  output_root: runs
+scenario:
+  mode: inference
+  climate_scenario: arise-sai-1p5
+  member: r1i1p1f2
+  years: [2035, 2070]
+data:
+  gcm_file: data/UKESM1_arise-sai-1p5_r1i1p1f2_tasmax_hurs_pr_lowres_SEA_2035_2070.nc
+  target_grid_file: data/ERA5_daily_tasmax_hurs_pr_heatindex_native_025deg_SEA_2015_2025.nc
+  checkpoint: runs/production-r1/training/best.pt
+  input_channels: [tasmax_gcm, hurs_gcm, pr_gcm]
+  target_channels: [tasmax_era5, hurs_era5, pr_era5]
+model:
+  class_path: truss_downscaling.models.residual_unet.ResidualUNet
+  parameters:
+    in_channels: 3
+    out_channels: 3
+    depth: 4
+    base_width: 64
