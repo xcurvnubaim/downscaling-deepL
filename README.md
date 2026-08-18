@@ -3,7 +3,7 @@
 This project provides a config-driven, staged deep-learning pipeline for
 statistical downscaling of daily meteorological fields over Southeast Asia.
 The current pipeline maps UKESM1 `tasmax`, `hurs`, and `pr` fields from a
-`36 Ã— 27` low-resolution grid to the native ERA5 `181 Ã— 201` grid using a
+`36 × 27` low-resolution grid to the native ERA5 `181 × 201` grid using a
 Residual U-Net.
 
 The stages are independent: a failed training run can reuse completed
@@ -92,44 +92,44 @@ Each run stores artifacts under `runs/<run-id>/`:
 
 ```text
 runs/<run-id>/
-â”œâ”€â”€ preprocessing/
-â”‚   â”œâ”€â”€ X.npy
-â”‚   â”œâ”€â”€ Y.npy
-â”‚   â”œâ”€â”€ splits.npz
-â”‚   â”œâ”€â”€ normalization.json
-â”‚   â”œâ”€â”€ metadata.json
-â”‚   â””â”€â”€ _SUCCESS
-â”œâ”€â”€ training/
-â”‚   â”œâ”€â”€ last.pt
-â”‚   â”œâ”€â”€ best.pt
-â”‚   â”œâ”€â”€ history.csv
-â”‚   â””â”€â”€ _SUCCESS
-â””â”€â”€ evaluation/
-    â”œâ”€â”€ test_metrics.csv
-    â””â”€â”€ _SUCCESS
+├── preprocessing/
+│   ├── X.npy
+│   ├── Y.npy
+│   ├── splits.npz
+│   ├── normalization.json
+│   ├── metadata.json
+│   └── _SUCCESS
+├── training/
+│   ├── last.pt
+│   ├── best.pt
+│   ├── history.csv
+│   └── _SUCCESS
+└── evaluation/
+    ├── test_metrics.csv
+    └── _SUCCESS
 ```
 
 ## Notebook experiments
 
 The repository history also contains four Jupyter notebooks for an earlier
-IFS/ERA5 downscaling experiment. These notebooks use four channels and a 6Ã—
+IFS/ERA5 downscaling experiment. These notebooks use four channels and a 6×
 resolution change, and should be treated as a separate experimental workflow
 rather than as the interface for the staged pipeline.
 
 | Notebook | Model | Input/output |
 | --- | --- | --- |
-| [`unet.ipynb`](unet.ipynb) | SRUNet | `4 Ã— 24 Ã— 32` â†’ `4 Ã— 144 Ã— 192` |
-| [`unet_preupsample.ipynb`](unet_preupsample.ipynb) | U-Net | `4 Ã— 144 Ã— 192` â†’ `4 Ã— 144 Ã— 192` |
-| [`gan.ipynb`](gan.ipynb) | RRDB generator with residual discriminator | `4 Ã— 24 Ã— 32` â†’ `4 Ã— 144 Ã— 192` |
-| [`gan_preupsample.ipynb`](gan_preupsample.ipynb) | RRDB generator with residual discriminator | `4 Ã— 144 Ã— 192` â†’ `4 Ã— 144 Ã— 192` |
+| [`unet.ipynb`](unet.ipynb) | SRUNet | `4 × 24 × 32` → `4 × 144 × 192` |
+| [`unet_preupsample.ipynb`](unet_preupsample.ipynb) | U-Net | `4 × 144 × 192` → `4 × 144 × 192` |
+| [`gan.ipynb`](gan.ipynb) | RRDB generator with residual discriminator | `4 × 24 × 32` → `4 × 144 × 192` |
+| [`gan_preupsample.ipynb`](gan_preupsample.ipynb) | RRDB generator with residual discriminator | `4 × 144 × 192` → `4 × 144 × 192` |
 
 The notebook variables are U10, V10, T2m, and 24-hour precipitation. Their
 expected datasets are:
 
 ```text
 data/
-â”œâ”€â”€ ifs_lowres_indonesia_2018-2022.zarr
-â””â”€â”€ era5_indonesia_2018-2022.zarr
+├── ifs_lowres_indonesia_2018-2022.zarr
+└── era5_indonesia_2018-2022.zarr
 ```
 
 The notebooks select a one-day forecast lead, split samples by date, compute
