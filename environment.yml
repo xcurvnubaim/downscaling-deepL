@@ -1,0 +1,13 @@
+name: truss-xesmf
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - xesmf
+  - esmpy
+  - xarray
+  - netcdf4
+  - dask
+  - matplotlib
+  - cartopy
+  - pip

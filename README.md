@@ -11,21 +11,59 @@ preprocessing artifacts, and training can resume from `last.pt`.
 
 ## Environment
 
-Python 3.12 is the supported baseline. Create an isolated environment and
-install the project with its test dependencies:
+Python 3.12 is the supported baseline. For preprocessing and inference, use
+the conda-forge environment because xESMF depends on ESMPy, which is not
+available from PyPI:
+
+On Linux, install Mamba through Miniforge:
 
 ```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[test]"
+cd /tmp
+curl -L -O \
+  "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh"
+bash Miniforge3-Linux-x86_64.sh
+~/miniforge3/bin/conda init zsh
+source ~/miniforge3/etc/profile.d/conda.sh
+mamba --version
 ```
 
-For xESMF, diagnostic plots, and optional Weights & Biases tracking:
+For a non-interactive shell or script, use the batch installer instead. This
+automatically accepts the license and avoids stopping at the license prompt:
 
 ```bash
-python -m pip install -e ".[all]"
+bash Miniforge3-Linux-x86_64.sh -b -p "$HOME/miniforge3"
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+"$HOME/miniforge3/bin/mamba" --version
 ```
+
+Then create the project environment:
+
+```bash
+cd /home/xcurv/work/downscaling-deepL
+mamba env create -f environment.yml
+mamba activate truss-xesmf
+python -m pip install -e ".[test,tracking]"
+```
+
+Verify the xESMF installation:
+
+```bash
+python -c "import xesmf, ESMF; print('xESMF OK:', xesmf.__version__)"
+```
+
+Conda can be used instead of mamba:
+
+```bash
+conda env create -f environment.yml
+conda activate truss-xesmf
+python -m pip install -e ".[test,tracking]"
+```
+
+For tests or code paths that do not regrid data, a regular Python virtual
+environment with `python -m pip install -e ".[test]"` is sufficient. The
+preprocessing and inference commands require the conda-forge xESMF
+environment. Diagnostic maps are included in `environment.yml`; W&B tracking
+is optional and enabled with `tracking.enabled: true`.
 
 Install a CUDA-enabled PyTorch build separately using the command appropriate
 for the target CUDA runtime. The project does not pin a machine-specific CUDA
