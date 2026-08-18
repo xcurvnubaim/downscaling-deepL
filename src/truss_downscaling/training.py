@@ -4,6 +4,7 @@ import csv
 import json
 import random
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -14,6 +15,10 @@ from torch.utils.data import DataLoader, Dataset
 
 from .checkpointing import atomic_torch_save, mark_success, stage_is_complete
 from .config import Config
+from .transforms import validate_norm_stats
+
+
+CHECKPOINT_VERSION = 2
 
 
 class GlobalSSIML1(nn.Module):
@@ -23,12 +28,17 @@ class GlobalSSIML1(nn.Module):
 
     def forward(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         l1 = torch.abs(prediction - target).mean()
-        mu_x, mu_y = prediction.mean(dim=(-2, -1), keepdim=True), target.mean(dim=(-2, -1), keepdim=True)
+        mu_x = prediction.mean(dim=(-2, -1), keepdim=True)
+        mu_y = target.mean(dim=(-2, -1), keepdim=True)
         var_x = ((prediction - mu_x) ** 2).mean(dim=(-2, -1), keepdim=True)
         var_y = ((target - mu_y) ** 2).mean(dim=(-2, -1), keepdim=True)
         cov = ((prediction - mu_x) * (target - mu_y)).mean(dim=(-2, -1), keepdim=True)
         c1, c2 = 0.01**2, 0.03**2
-        ssim = ((2 * mu_x * mu_y + c1) * (2 * cov + c2) / ((mu_x**2 + mu_y**2 + c1) * (var_x + var_y + c2))).mean()
+        ssim = (
+            (2 * mu_x * mu_y + c1)
+            * (2 * cov + c2)
+            / ((mu_x**2 + mu_y**2 + c1) * (var_x + var_y + c2))
+        ).mean()
         return self.alpha * (1 - ssim) + (1 - self.alpha) * l1
 
 
@@ -46,14 +56,138 @@ class ArrayDataset(Dataset):
         return torch.from_numpy(self.x[index].copy()), torch.from_numpy(self.y[index].copy())
 
 
-def _loader(stage: Path, split: str, batch_size: int, shuffle: bool = False) -> DataLoader:
+def _seed_worker(worker_id: int) -> None:
+    del worker_id
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def _loader(
+    stage: Path,
+    split: str,
+    batch_size: int,
+    shuffle: bool = False,
+    *,
+    seed: int = 42,
+    num_workers: int = 2,
+    pin_memory: bool | None = None,
+) -> DataLoader:
     with np.load(stage / "splits.npz", allow_pickle=False) as arrays:
+        if split not in arrays.files:
+            raise RuntimeError(f"preprocessing artifacts do not contain a {split!r} split")
         indices = arrays[split].copy()
-    return DataLoader(ArrayDataset(stage, indices), batch_size=batch_size, shuffle=shuffle, num_workers=2, pin_memory=torch.cuda.is_available())
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    if pin_memory is None:
+        pin_memory = torch.cuda.is_available()
+    return DataLoader(
+        ArrayDataset(stage, indices),
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        worker_init_fn=_seed_worker if num_workers else None,
+        generator=generator,
+    )
+
+
+def _resolve_device(config: Config) -> torch.device:
+    requested = config.training.get("device", "auto")
+    if requested == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(requested)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(f"requested device {requested!r}, but CUDA is unavailable")
+    return device
+
+
+def _use_data_parallel(config: Config, device: torch.device) -> bool:
+    return (
+        bool(config.training.get("multi_gpu", True))
+        and device.type == "cuda"
+        and torch.cuda.device_count() > 1
+    )
+
+
+def _batch_size(config: Config, device: torch.device) -> int:
+    configured = config.training.get("batch_size_per_device")
+    if configured is None:
+        configured = config.training.get("batch_size", 16)
+    per_device = int(configured)
+    if per_device < 1:
+        raise ValueError("training batch size must be positive")
+    return per_device * torch.cuda.device_count() if _use_data_parallel(config, device) else per_device
 
 
 def _model(config: Config, device: torch.device) -> nn.Module:
     return config.model_class()(**config.model.get("parameters", {})).to(device)
+
+
+def _raw_model(model: nn.Module) -> nn.Module:
+    return model.module if isinstance(model, nn.DataParallel) else model
+
+
+def _history_path(out: Path) -> Path:
+    return out / "history.csv"
+
+
+def _read_history(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    with path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    if not rows:
+        return []
+    if "val_loss" not in rows[0] or "lr" not in rows[0]:
+        raise RuntimeError("training history uses an older format; rerun with --restart")
+    return [
+        {
+            "epoch": int(row["epoch"]),
+            "train_loss": float(row["train_loss"]),
+            "val_loss": float(row["val_loss"]),
+            "lr": float(row["lr"]),
+        }
+        for row in rows
+    ]
+
+
+def _write_history(path: Path, history: list[dict[str, Any]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        fieldnames = ["epoch", "train_loss", "val_loss", "lr"]
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(history)
+
+
+def _maybe_start_wandb(config: Config, checkpoint: dict[str, Any] | None) -> Any:
+    tracking = config.raw.get("tracking", {})
+    if not tracking.get("enabled", False):
+        return None
+    try:
+        import wandb
+
+        run_config = {
+            "batch_size": _batch_size(config, _resolve_device(config)),
+            "epochs": int(config.training.get("epochs", 300)),
+            "lr": float(config.training.get("learning_rate", 1e-3)),
+            "weight_decay": float(config.training.get("weight_decay", 1e-4)),
+            "ssim_alpha": float(config.training.get("ssim_alpha", 0.84)),
+            **config.model.get("parameters", {}),
+            "channels": list(config.data["input_channels"]),
+        }
+        kwargs = {
+            "project": tracking.get("project", "truss-downscaling"),
+            "name": tracking.get("run_name", config.run.get("id")),
+            "config": run_config,
+            "resume": "allow",
+        }
+        if checkpoint and checkpoint.get("wandb_run_id"):
+            kwargs["id"] = checkpoint["wandb_run_id"]
+        return wandb.init(**kwargs)
+    except Exception as error:  # W&B is deliberately non-critical.
+        print(f"wandb unavailable ({type(error).__name__}); logging to CSV only")
+        return None
 
 
 def run_train(config: Config, force: bool = False, restart: bool = False) -> Path:
@@ -64,45 +198,138 @@ def run_train(config: Config, force: bool = False, restart: bool = False) -> Pat
     out.mkdir(parents=True, exist_ok=True)
     if stage_is_complete(out) and not force:
         return out
+
     seed = int(config.run.get("seed", 42))
-    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
-    requested_device = config.training.get("device", "auto")
-    device = torch.device(("cuda" if torch.cuda.is_available() else "cpu") if requested_device == "auto" else requested_device)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    device = _resolve_device(config)
     model = _model(config, device)
-    optimizer = AdamW(model.parameters(), lr=float(config.training.get("learning_rate", 1e-3)), weight_decay=float(config.training.get("weight_decay", 1e-4)))
-    epochs = int(config.training.get("epochs", 30))
+    use_data_parallel = _use_data_parallel(config, device)
+    if use_data_parallel:
+        model = nn.DataParallel(model)
+
+    optimizer = AdamW(
+        model.parameters(),
+        lr=float(config.training.get("learning_rate", 1e-3)),
+        weight_decay=float(config.training.get("weight_decay", 1e-4)),
+    )
+    epochs = int(config.training.get("epochs", 300))
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
     criterion = GlobalSSIML1(float(config.training.get("ssim_alpha", 0.84)))
     norm_stats = json.loads((stage / "normalization.json").read_text(encoding="utf-8"))
-    start_epoch, best = 0, float("inf")
+    validate_norm_stats(norm_stats)
+
+    start_epoch = 1
+    best = float("inf")
+    saved: dict[str, Any] | None = None
     last = out / "last.pt"
+    history = [] if restart else _read_history(_history_path(out))
     if last.exists() and not restart:
         saved = torch.load(last, map_location=device, weights_only=False)
-        model.load_state_dict(saved["model_state"]); optimizer.load_state_dict(saved["optimizer_state"]); scheduler.load_state_dict(saved["scheduler_state"])
-        start_epoch, best = saved["epoch"] + 1, saved["best_loss"]
+        if int(saved.get("checkpoint_version", 0)) != CHECKPOINT_VERSION:
+            raise RuntimeError("training checkpoint uses an older format; rerun with --restart")
+        _raw_model(model).load_state_dict(saved["model_state"])
+        optimizer.load_state_dict(saved["optimizer_state"])
+        scheduler.load_state_dict(saved["scheduler_state"])
+        start_epoch = int(saved["epoch"]) + 1
+        best = float(saved["best_val_loss"])
+
     with np.load(stage / "splits.npz", allow_pickle=False) as splits:
         split_names = set(splits.files)
     training_split = "train" if "train" in split_names else "production"
-    train_loader = _loader(stage, training_split, int(config.training.get("batch_size", 16)), shuffle=True)
-    val_loader = _loader(stage, "validation", int(config.training.get("batch_size", 16))) if "validation" in split_names else None
-    history = []
-    for epoch in range(start_epoch, epochs):
-        model.train(); train_loss = 0.0
+    batch_size = _batch_size(config, device)
+    num_workers = int(config.training.get("num_workers", 2))
+    train_loader = _loader(
+        stage,
+        training_split,
+        batch_size,
+        shuffle=True,
+        seed=seed,
+        num_workers=num_workers,
+        pin_memory=device.type == "cuda",
+    )
+    val_loader = (
+        _loader(
+            stage,
+            "validation",
+            batch_size,
+            seed=seed + 1,
+            num_workers=num_workers,
+            pin_memory=device.type == "cuda",
+        )
+        if "validation" in split_names
+        else None
+    )
+
+    wandb_run = _maybe_start_wandb(config, saved)
+    for epoch in range(start_epoch, epochs + 1):
+        model.train()
+        train_total = 0.0
         for xb, yb in train_loader:
-            xb, yb = xb.to(device), yb.to(device); optimizer.zero_grad(set_to_none=True)
-            loss = criterion(model(xb), yb); loss.backward(); optimizer.step(); train_loss += loss.item() * len(xb)
-        train_loss /= len(train_loader.dataset)
-        model.eval(); val_loss = train_loss
-        if val_loader:
+            xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+            loss = criterion(model(xb), yb)
+            loss.backward()
+            optimizer.step()
+            train_total += loss.item() * len(xb)
+        train_loss = train_total / len(train_loader.dataset)
+
+        model.eval()
+        val_loss = train_loss
+        if val_loader is not None:
+            val_total = 0.0
             with torch.no_grad():
-                val_loss = sum(criterion(model(xb.to(device)), yb.to(device)).item() * len(xb) for xb, yb in val_loader) / len(val_loader.dataset)
+                for xb, yb in val_loader:
+                    val_total += criterion(model(xb.to(device)), yb.to(device)).item() * len(xb)
+            val_loss = val_total / len(val_loader.dataset)
+
         scheduler.step()
-        payload = {"epoch": epoch, "model_state": model.state_dict(), "optimizer_state": optimizer.state_dict(), "scheduler_state": scheduler.state_dict(), "best_loss": min(best, val_loss), "config": config.raw, "model_class": config.model.get("class_path"), "norm_stats": norm_stats}
+        learning_rate = scheduler.get_last_lr()[0]
+        is_best = val_loss < best
+        if is_best:
+            best = val_loss
+        payload = {
+            "checkpoint_version": CHECKPOINT_VERSION,
+            "epoch": epoch,
+            "model_state": _raw_model(model).state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "scheduler_state": scheduler.state_dict(),
+            "best_val_loss": best,
+            "val_loss": val_loss,
+            "config": config.raw,
+            "model_class": config.model.get("class_path"),
+            "norm_stats": norm_stats,
+        }
+        if wandb_run is not None:
+            payload["wandb_run_id"] = wandb_run.id
         atomic_torch_save(payload, last)
-        if val_loss < best:
-            best = val_loss; atomic_torch_save(payload, out / "best.pt")
-        history.append({"epoch": epoch, "train_loss": train_loss, "validation_loss": val_loss})
-    with (out / "history.csv").open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=history[0].keys() if history else ["epoch", "train_loss", "validation_loss"]); writer.writeheader(); writer.writerows(history)
-    mark_success(out, {"best_loss": best, "epochs": epochs, "device": str(device), "model_class": config.model.get("class_path")})
+        if is_best:
+            atomic_torch_save(payload, out / "best.pt")
+
+        row = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, "lr": learning_rate}
+        history = [item for item in history if int(item["epoch"]) != epoch]
+        history.append(row)
+        history.sort(key=lambda item: int(item["epoch"]))
+        _write_history(_history_path(out), history)
+        if wandb_run is not None:
+            wandb_run.log({"train_loss": train_loss, "val_loss": val_loss, "lr": learning_rate}, step=epoch)
+
+    if wandb_run is not None:
+        wandb_run.finish()
+    _write_history(_history_path(out), history)
+    mark_success(
+        out,
+        {
+            "best_loss": best,
+            "epochs": epochs,
+            "device": str(device),
+            "model_class": config.model.get("class_path"),
+            "batch_size": batch_size,
+            "data_parallel": use_data_parallel,
+        },
+    )
     return out

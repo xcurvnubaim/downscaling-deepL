@@ -21,7 +21,7 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[test]"
 ```
 
-For optional xESMF and plotting dependencies:
+For xESMF, diagnostic plots, and optional Weights & Biases tracking:
 
 ```bash
 python -m pip install -e ".[all]"
@@ -65,6 +65,12 @@ truss-downscale run --config configs/development.yaml
 Training resumes from `runs/<run-id>/training/last.pt`. Use `--restart` to
 start from new weights, or `--force` to rerun a completed stage.
 
+The development configuration follows the UKESM1/ERA5 log1p notebook: it uses
+300 epochs, AdamW with cosine annealing, the global SSIM-plus-L1 loss, bilinear
+xESMF regridding, and `log1p` precipitation transforms on both inputs and
+targets. Enable `tracking.enabled` to send epoch and evaluation metrics to
+Weights & Biases; CSV artifacts are always written locally.
+
 For future inference, use a production checkpoint:
 
 ```bash
@@ -82,7 +88,8 @@ The current pipeline uses three variables:
 | `pr` | Daily precipitation |
 
 Preprocessing is performed before training and records its metadata and
-normalization statistics as run artifacts. Climate datasets and trained model
+normalization statistics as run artifacts. Statistics and edge fill values are
+computed from the training period only. Climate datasets and trained model
 checkpoints are intentionally excluded from this repository because of their
 size.
 
@@ -106,8 +113,18 @@ runs/<run-id>/
 │   └── _SUCCESS
 └── evaluation/
     ├── test_metrics.csv
+    ├── bias_metrics.csv
+    ├── figures/
+    │   └── tasmax_map_input_pred_target_bias.png
     └── _SUCCESS
 ```
+
+`test_metrics.csv` contains standardized RMSE, MAE, SSIM, and physical-unit
+precipitation-aware RMSE per channel. `bias_metrics.csv` compares the initial
+GCM bias with the post-prediction bias in physical units. Existing artifacts
+created before the dual-sided precipitation transform are not compatible with
+the current checkpoint format and must be regenerated with `--force` and
+`--restart`.
 
 ## Notebook experiments
 

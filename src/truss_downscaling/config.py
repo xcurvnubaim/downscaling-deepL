@@ -24,6 +24,10 @@ class Config:
     @property
     def training(self) -> dict[str, Any]: return self.raw.setdefault("training", {})
     @property
+    def tracking(self) -> dict[str, Any]: return self.raw.setdefault("tracking", {})
+    @property
+    def evaluation(self) -> dict[str, Any]: return self.raw.setdefault("evaluation", {})
+    @property
     def scenario(self) -> dict[str, Any]: return self.raw.setdefault("scenario", {})
 
     @property

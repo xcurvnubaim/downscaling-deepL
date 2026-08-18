@@ -25,9 +25,18 @@ model:
     depth: 4
     base_width: 64
 training:
-  epochs: 30
-  batch_size: 16
+  epochs: 100
+  batch_size_per_device: 16
+  num_workers: 2
+  multi_gpu: true
   learning_rate: 0.001
   weight_decay: 0.0001
   ssim_alpha: 0.84
   device: auto
+tracking:
+  enabled: false
+  project: truss-downscaling
+  run_name: dev-log1p
+evaluation:
+  generate_plots: true
+  map_channel: tasmax_era5

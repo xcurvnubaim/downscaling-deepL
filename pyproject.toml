@@ -14,8 +14,9 @@ dependencies = ["numpy", "pandas", "pyyaml", "xarray", "netcdf4", "torch"]
 [project.optional-dependencies]
 data = ["xesmf"]
 plots = ["matplotlib", "cartopy"]
+tracking = ["wandb"]
 test = ["pytest"]
-all = ["xesmf", "matplotlib", "cartopy", "pytest"]
+all = ["xesmf", "matplotlib", "cartopy", "wandb", "pytest"]
 
 [project.scripts]
 truss-downscale = "truss_downscaling.cli:main"
