@@ -1,4 +1,6 @@
 import json
+import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
@@ -9,7 +11,7 @@ from truss_downscaling.evaluation import run_evaluate
 from truss_downscaling import preprocessing
 from truss_downscaling.preprocessing import run_preprocess
 from truss_downscaling.models.residual_unet import ResidualUNet
-from truss_downscaling.training import run_train
+from truss_downscaling.training import _upload_wandb_artifact, run_train
 from truss_downscaling.transforms import to_physical_targets, standardize_inputs
 
 
@@ -155,6 +157,43 @@ def test_training_and_evaluation_write_notebook_artifacts(tmp_path, monkeypatch)
     checkpoint = torch.load(config.output_root / "training" / "best.pt", map_location="cpu", weights_only=False)
     assert checkpoint["checkpoint_version"] == 2
     assert checkpoint["epoch"] == 1
+    execution_log = (config.output_root / "training" / "training.log").read_text(encoding="utf-8")
+    assert "Training started" in execution_log
+    assert "Epoch 1/1" in execution_log
+    assert "Training completed" in execution_log
+    manifest = json.loads((config.output_root / "training" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["duration_seconds"] > 0
     assert (evaluation / "test_metrics.csv").exists()
     assert (evaluation / "bias_metrics.csv").exists()
     assert "rmse_phys" in (evaluation / "test_metrics.csv").read_text(encoding="utf-8").splitlines()[0]
+
+
+def test_completed_training_artifact_contains_checkpoint_and_metadata(tmp_path, monkeypatch):
+    config = load_config(_smoke_config(tmp_path))
+    config.tracking["artifacts"] = {"aliases": ["latest", "best"]}
+    out = tmp_path / "training"
+    out.mkdir()
+    for name in ("best.pt", "history.csv", "manifest.json"):
+        (out / name).write_text(name, encoding="utf-8")
+
+    class Artifact:
+        def __init__(self, **kwargs):
+            self.name = kwargs["name"]
+            self.metadata = kwargs["metadata"]
+            self.files = []
+
+        def add_file(self, path, name):
+            self.files.append((Path(path), name))
+
+    run = SimpleNamespace(summary={}, logged=[])
+    run.log_artifact = lambda artifact, aliases: run.logged.append((artifact, aliases))
+    monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(Artifact=Artifact))
+
+    _upload_wandb_artifact(config, run, out, 0.125)
+
+    artifact, aliases = run.logged[0]
+    assert artifact.name == "smoke-model"
+    assert artifact.metadata["best_val_loss"] == 0.125
+    assert [name for _, name in artifact.files] == ["best.pt", "history.csv", "manifest.json"]
+    assert aliases == ["latest", "best"]
+    assert run.summary["artifact/status"] == "uploaded"

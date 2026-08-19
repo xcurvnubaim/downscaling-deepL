@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
+import platform
 import random
+import socket
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -160,7 +165,32 @@ def _write_history(path: Path, history: list[dict[str, Any]]) -> None:
         writer.writerows(history)
 
 
-def _maybe_start_wandb(config: Config, checkpoint: dict[str, Any] | None) -> Any:
+def _execution_logger(out: Path) -> logging.Logger:
+    logger = logging.getLogger(f"truss_downscaling.training.{out.resolve()}")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    for handler in logger.handlers:
+        handler.close()
+    logger.handlers.clear()
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    file_handler = logging.FileHandler(out / "training.log", encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+    return logger
+
+
+def _maybe_start_wandb(
+    config: Config,
+    checkpoint: dict[str, Any] | None,
+    *,
+    device: torch.device,
+    batch_size: int,
+    train_samples: int,
+    validation_samples: int,
+) -> Any:
     tracking = config.raw.get("tracking", {})
     if not tracking.get("enabled", False):
         return None
@@ -168,7 +198,12 @@ def _maybe_start_wandb(config: Config, checkpoint: dict[str, Any] | None) -> Any
         import wandb
 
         run_config = {
-            "batch_size": _batch_size(config, _resolve_device(config)),
+            "run_id": config.run.get("id", config.path.stem),
+            "seed": int(config.run.get("seed", 42)),
+            "device": str(device),
+            "batch_size": batch_size,
+            "train_samples": train_samples,
+            "validation_samples": validation_samples,
             "epochs": int(config.training.get("epochs", 300)),
             "lr": float(config.training.get("learning_rate", 1e-3)),
             "weight_decay": float(config.training.get("weight_decay", 1e-4)),
@@ -184,10 +219,55 @@ def _maybe_start_wandb(config: Config, checkpoint: dict[str, Any] | None) -> Any
         }
         if checkpoint and checkpoint.get("wandb_run_id"):
             kwargs["id"] = checkpoint["wandb_run_id"]
-        return wandb.init(**kwargs)
+        run = wandb.init(**kwargs)
+        run.summary.update(
+            {
+                "execution/hostname": socket.gethostname(),
+                "execution/python": platform.python_version(),
+                "execution/pytorch": torch.__version__,
+                "execution/platform": platform.platform(),
+                "execution/cuda_available": torch.cuda.is_available(),
+                "execution/gpu_count": torch.cuda.device_count(),
+                "execution/command": " ".join(sys.argv),
+                "execution/status": "running",
+            }
+        )
+        return run
     except Exception as error:  # W&B is deliberately non-critical.
         print(f"wandb unavailable ({type(error).__name__}); logging to CSV only")
         return None
+
+
+def _upload_wandb_artifact(config: Config, run: Any, out: Path, best_loss: float) -> None:
+    artifact_config = config.tracking.get("artifacts", {})
+    if not artifact_config.get("enabled", True):
+        return
+    try:
+        import wandb
+
+        artifact = wandb.Artifact(
+            name=artifact_config.get("name", f"{config.run.get('id', config.path.stem)}-model"),
+            type=artifact_config.get("type", "model"),
+            description="Best validation checkpoint from a completed downscaling training run",
+            metadata={
+                "run_id": config.run.get("id", config.path.stem),
+                "best_val_loss": best_loss,
+                "checkpoint_version": CHECKPOINT_VERSION,
+                "model_class": config.model.get("class_path"),
+            },
+        )
+        artifact.add_file(str(out / "best.pt"), name="best.pt")
+        artifact.add_file(str(out / "history.csv"), name="history.csv")
+        artifact.add_file(str(out / "manifest.json"), name="manifest.json")
+        run.log_artifact(artifact, aliases=list(artifact_config.get("aliases", ["latest", "best"])))
+        run.summary["artifact/name"] = artifact.name
+        run.summary["artifact/status"] = "uploaded"
+    except Exception as error:  # Local checkpoints must remain usable if artifact storage is down.
+        run.summary["artifact/status"] = "failed"
+        run.summary["artifact/error"] = f"{type(error).__name__}: {error}"
+        logging.getLogger(f"truss_downscaling.training.{out.resolve()}").exception(
+            "W&B checkpoint artifact upload failed"
+        )
 
 
 def run_train(config: Config, force: bool = False, restart: bool = False) -> Path:
@@ -198,6 +278,9 @@ def run_train(config: Config, force: bool = False, restart: bool = False) -> Pat
     out.mkdir(parents=True, exist_ok=True)
     if stage_is_complete(out) and not force:
         return out
+    logger = _execution_logger(out)
+    started_at = time.perf_counter()
+    logger.info("Training started run_id=%s config=%s", config.run.get("id", config.path.stem), config.path)
 
     seed = int(config.run.get("seed", 42))
     random.seed(seed)
@@ -265,71 +348,143 @@ def run_train(config: Config, force: bool = False, restart: bool = False) -> Pat
         else None
     )
 
-    wandb_run = _maybe_start_wandb(config, saved)
-    for epoch in range(start_epoch, epochs + 1):
-        model.train()
-        train_total = 0.0
-        for xb, yb in train_loader:
-            xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
-            optimizer.zero_grad(set_to_none=True)
-            loss = criterion(model(xb), yb)
-            loss.backward()
-            optimizer.step()
-            train_total += loss.item() * len(xb)
-        train_loss = train_total / len(train_loader.dataset)
+    wandb_run = _maybe_start_wandb(
+        config,
+        saved,
+        device=device,
+        batch_size=batch_size,
+        train_samples=len(train_loader.dataset),
+        validation_samples=len(val_loader.dataset) if val_loader is not None else 0,
+    )
+    logger.info(
+        "Execution device=%s data_parallel=%s batch_size=%d train_samples=%d validation_samples=%d start_epoch=%d",
+        device,
+        use_data_parallel,
+        batch_size,
+        len(train_loader.dataset),
+        len(val_loader.dataset) if val_loader is not None else 0,
+        start_epoch,
+    )
+    log_every = max(1, int(config.tracking.get("log_every_n_steps", 10)))
+    global_step = (start_epoch - 1) * len(train_loader)
+    try:
+        for epoch in range(start_epoch, epochs + 1):
+            epoch_started_at = time.perf_counter()
+            model.train()
+            train_total = 0.0
+            for batch_index, (xb, yb) in enumerate(train_loader, start=1):
+                xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
+                optimizer.zero_grad(set_to_none=True)
+                loss = criterion(model(xb), yb)
+                loss.backward()
+                optimizer.step()
+                batch_loss = loss.item()
+                train_total += batch_loss * len(xb)
+                global_step += 1
+                if wandb_run is not None and (batch_index % log_every == 0 or batch_index == len(train_loader)):
+                    wandb_run.log(
+                        {
+                            "train/batch_loss": batch_loss,
+                            "train/epoch": epoch,
+                            "train/batch": batch_index,
+                        },
+                        step=global_step,
+                    )
+            train_loss = train_total / len(train_loader.dataset)
 
-        model.eval()
-        val_loss = train_loss
-        if val_loader is not None:
-            val_total = 0.0
-            with torch.no_grad():
-                for xb, yb in val_loader:
-                    val_total += criterion(model(xb.to(device)), yb.to(device)).item() * len(xb)
-            val_loss = val_total / len(val_loader.dataset)
+            model.eval()
+            val_loss = train_loss
+            if val_loader is not None:
+                val_total = 0.0
+                with torch.no_grad():
+                    for xb, yb in val_loader:
+                        val_total += criterion(model(xb.to(device)), yb.to(device)).item() * len(xb)
+                val_loss = val_total / len(val_loader.dataset)
 
-        scheduler.step()
-        learning_rate = scheduler.get_last_lr()[0]
-        is_best = val_loss < best
-        if is_best:
-            best = val_loss
-        payload = {
-            "checkpoint_version": CHECKPOINT_VERSION,
-            "epoch": epoch,
-            "model_state": _raw_model(model).state_dict(),
-            "optimizer_state": optimizer.state_dict(),
-            "scheduler_state": scheduler.state_dict(),
-            "best_val_loss": best,
-            "val_loss": val_loss,
-            "config": config.raw,
-            "model_class": config.model.get("class_path"),
-            "norm_stats": norm_stats,
-        }
-        if wandb_run is not None:
-            payload["wandb_run_id"] = wandb_run.id
-        atomic_torch_save(payload, last)
-        if is_best:
-            atomic_torch_save(payload, out / "best.pt")
+            scheduler.step()
+            learning_rate = scheduler.get_last_lr()[0]
+            epoch_seconds = time.perf_counter() - epoch_started_at
+            is_best = val_loss < best
+            if is_best:
+                best = val_loss
+            payload = {
+                "checkpoint_version": CHECKPOINT_VERSION,
+                "epoch": epoch,
+                "model_state": _raw_model(model).state_dict(),
+                "optimizer_state": optimizer.state_dict(),
+                "scheduler_state": scheduler.state_dict(),
+                "best_val_loss": best,
+                "val_loss": val_loss,
+                "config": config.raw,
+                "model_class": config.model.get("class_path"),
+                "norm_stats": norm_stats,
+            }
+            if wandb_run is not None:
+                payload["wandb_run_id"] = wandb_run.id
+            atomic_torch_save(payload, last)
+            if is_best:
+                atomic_torch_save(payload, out / "best.pt")
 
-        row = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, "lr": learning_rate}
-        history = [item for item in history if int(item["epoch"]) != epoch]
-        history.append(row)
-        history.sort(key=lambda item: int(item["epoch"]))
+            row = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, "lr": learning_rate}
+            history = [item for item in history if int(item["epoch"]) != epoch]
+            history.append(row)
+            history.sort(key=lambda item: int(item["epoch"]))
+            _write_history(_history_path(out), history)
+            logger.info(
+                "Epoch %d/%d train_loss=%.6f val_loss=%.6f lr=%.8g seconds=%.2f best=%s",
+                epoch,
+                epochs,
+                train_loss,
+                val_loss,
+                learning_rate,
+                epoch_seconds,
+                is_best,
+            )
+            if wandb_run is not None:
+                wandb_run.log(
+                    {
+                        "epoch": epoch,
+                        "train_loss": train_loss,
+                        "val_loss": val_loss,
+                        "lr": learning_rate,
+                        "execution/epoch_seconds": epoch_seconds,
+                        "execution/samples_per_second": len(train_loader.dataset) / epoch_seconds,
+                    },
+                    step=global_step,
+                )
+
         _write_history(_history_path(out), history)
-        if wandb_run is not None:
-            wandb_run.log({"train_loss": train_loss, "val_loss": val_loss, "lr": learning_rate}, step=epoch)
-
-    if wandb_run is not None:
-        wandb_run.finish()
-    _write_history(_history_path(out), history)
-    mark_success(
-        out,
-        {
+        duration = time.perf_counter() - started_at
+        manifest = {
             "best_loss": best,
             "epochs": epochs,
             "device": str(device),
             "model_class": config.model.get("class_path"),
             "batch_size": batch_size,
             "data_parallel": use_data_parallel,
-        },
-    )
+            "duration_seconds": duration,
+        }
+        mark_success(out, manifest)
+        logger.info("Training completed best_val_loss=%.6f duration_seconds=%.2f", best, duration)
+        if wandb_run is not None:
+            wandb_run.summary.update(
+                {
+                    "best_val_loss": best,
+                    "execution/duration_seconds": duration,
+                    "execution/status": "completed",
+                }
+            )
+            _upload_wandb_artifact(config, wandb_run, out, best)
+    except BaseException as error:
+        logger.exception("Training failed: %s", error)
+        if wandb_run is not None:
+            wandb_run.summary["execution/status"] = "failed"
+            wandb_run.summary["execution/error"] = f"{type(error).__name__}: {error}"
+        raise
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
+        for handler in logger.handlers:
+            handler.close()
+        logger.handlers.clear()
     return out

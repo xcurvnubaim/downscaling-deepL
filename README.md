@@ -106,8 +106,30 @@ start from new weights, or `--force` to rerun a completed stage.
 The development configuration follows the UKESM1/ERA5 log1p notebook: it uses
 300 epochs, AdamW with cosine annealing, the global SSIM-plus-L1 loss, bilinear
 xESMF regridding, and `log1p` precipitation transforms on both inputs and
-targets. Enable `tracking.enabled` to send epoch and evaluation metrics to
-Weights & Biases; CSV artifacts are always written locally.
+targets. Enable `tracking.enabled` to send live batch loss, epoch metrics,
+timing, throughput, and execution metadata to Weights & Biases. CSV artifacts
+and a timestamped `training.log` are always written locally.
+
+Configure tracking and completed-run checkpoint publishing with:
+
+```yaml
+tracking:
+  enabled: true
+  project: truss-downscaling
+  run_name: dev-log1p
+  log_every_n_steps: 10
+  artifacts:
+    enabled: true
+    type: model
+    aliases: [latest, best]
+```
+
+Install the tracking extra and authenticate once with `wandb login`. During
+training, W&B receives batch and epoch metrics. After successful completion,
+`best.pt`, `history.csv`, and the training manifest are published as a W&B
+model artifact named `<run-id>-model`. Set `tracking.artifacts.name` to use a
+custom artifact name. Artifact upload failures do not remove or invalidate the
+local checkpoint.
 
 For future inference, use a production checkpoint:
 
@@ -148,6 +170,8 @@ runs/<run-id>/
 │   ├── last.pt
 │   ├── best.pt
 │   ├── history.csv
+│   ├── training.log
+│   ├── manifest.json
 │   └── _SUCCESS
 └── evaluation/
     ├── test_metrics.csv

@@ -37,6 +37,11 @@ tracking:
   enabled: false
   project: truss-downscaling
   run_name: dev-log1p
+  log_every_n_steps: 10
+  artifacts:
+    enabled: true
+    type: model
+    aliases: [latest, best]
 evaluation:
   generate_plots: true
   map_channel: tasmax_era5
