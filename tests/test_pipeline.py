@@ -11,6 +11,7 @@ from truss_downscaling import cli
 from truss_downscaling.config import load_config
 from truss_downscaling.evaluation import run_evaluate
 from truss_downscaling.inference import (
+    _cpu_workers,
     _predict_in_batches,
     _ProgressBar,
     _time_chunks,
@@ -60,6 +61,13 @@ def test_inference_splits_long_time_series_into_chunks():
     assert list(_time_chunks(10, 4)) == [slice(0, 4), slice(4, 8), slice(8, 10)]
 
 
+def test_inference_cpu_workers_are_capped_by_channel_count(tmp_path):
+    config = load_config(_smoke_config(tmp_path))
+    config.inference["cpu_workers"] = 8
+
+    assert _cpu_workers(config) == 3
+
+
 def test_inference_progress_bar_reports_completion(monkeypatch):
     from io import StringIO
 
@@ -69,7 +77,7 @@ def test_inference_progress_bar_reports_completion(monkeypatch):
     monkeypatch.setattr(progress, "last_wall_time", 0.0)
     monkeypatch.setattr(progress, "last_cpu_time", 0.0)
     monkeypatch.setattr("truss_downscaling.inference.time.perf_counter", lambda: 2.0)
-    monkeypatch.setattr("truss_downscaling.inference.time.process_time", lambda: 1.0)
+    monkeypatch.setattr("truss_downscaling.inference._process_tree_cpu_time", lambda: 1.0)
     monkeypatch.setattr("truss_downscaling.inference._process_ram_gib", lambda: 3.25)
 
     progress.update(10)

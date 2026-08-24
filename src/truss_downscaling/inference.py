@@ -4,7 +4,9 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
+from multiprocessing import get_context
 from pathlib import Path
 from typing import TextIO
 
@@ -15,6 +17,30 @@ import xarray as xr
 from .checkpointing import mark_success
 from .config import Config
 from .transforms import to_physical_targets, validate_norm_stats
+
+
+_WORKER_SOURCE: xr.Dataset | None = None
+_WORKER_REGRIDDER = None
+
+
+def _init_regrid_worker(source_path: str, target_grid_path: str) -> None:
+    global _WORKER_SOURCE, _WORKER_REGRIDDER
+
+    import xesmf as xe
+
+    _WORKER_SOURCE = xr.open_dataset(source_path)
+    target_grid = xr.open_dataset(target_grid_path)
+    _WORKER_REGRIDDER = xe.Regridder(
+        _WORKER_SOURCE, target_grid, method="bilinear", periodic=False
+    )
+
+
+def _regrid_channel(task: tuple[str, str, int, int]) -> np.ndarray:
+    variable, time_name, start, stop = task
+    if _WORKER_SOURCE is None or _WORKER_REGRIDDER is None:
+        raise RuntimeError("regridding worker is not initialized")
+    values = _WORKER_SOURCE[variable].isel({time_name: slice(start, stop)})
+    return _WORKER_REGRIDDER(values).values.astype("float32", copy=False)
 
 
 def _path(config: Config, key: str) -> Path:
@@ -66,12 +92,37 @@ def _time_chunks(length: int, chunk_size: int):
         yield slice(start, min(start + chunk_size, length))
 
 
+def _cpu_workers(config: Config) -> int:
+    available = os.cpu_count() or 1
+    workers = int(config.inference.get("cpu_workers", min(3, available)))
+    if workers < 1:
+        raise ValueError("inference.cpu_workers must be at least 1")
+    return min(workers, len(config.data["input_channels"]))
+
+
 def _process_ram_gib() -> float | None:
     try:
         resident_pages = int(Path("/proc/self/statm").read_text().split()[1])
         return resident_pages * os.sysconf("SC_PAGE_SIZE") / 1024**3
     except (OSError, ValueError, IndexError):
         return None
+
+
+def _process_tree_cpu_time() -> float:
+    process_ids = [os.getpid()]
+    try:
+        children = Path("/proc/thread-self/children").read_text().split()
+        process_ids.extend(int(process_id) for process_id in children)
+    except (OSError, ValueError):
+        pass
+    ticks = 0
+    for process_id in process_ids:
+        try:
+            fields = Path(f"/proc/{process_id}/stat").read_text().rsplit(")", 1)[1].split()
+            ticks += int(fields[11]) + int(fields[12])
+        except (OSError, ValueError, IndexError):
+            continue
+    return ticks / os.sysconf("SC_CLK_TCK")
 
 
 class _ProgressBar:
@@ -86,7 +137,7 @@ class _ProgressBar:
         self.stream = stream
         self.started_at = time.perf_counter()
         self.last_wall_time = self.started_at
-        self.last_cpu_time = time.process_time()
+        self.last_cpu_time = _process_tree_cpu_time()
         self.nvml = None
         self.gpu_handle = None
         if self.device.type == "cuda":
@@ -109,7 +160,7 @@ class _ProgressBar:
 
     def update(self, completed: int) -> None:
         now = time.perf_counter()
-        cpu_time = time.process_time()
+        cpu_time = _process_tree_cpu_time()
         elapsed = now - self.started_at
         interval = now - self.last_wall_time
         cpu_percent = (cpu_time - self.last_cpu_time) / interval * 100 if interval else 0.0
@@ -185,10 +236,10 @@ def run_infer(config: Config, force: bool = False, progress: bool = False) -> Pa
         time_name = "time" if "time" in ds.coords else "date"
         target_lat = "lat" if "lat" in target_grid.coords else "latitude"
         target_lon = "lon" if "lon" in target_grid.coords else "longitude"
-        regridder = xe.Regridder(ds, target_grid, method="bilinear", periodic=False)
         time_chunk_size = int(config.inference.get("time_chunk_size", 32))
         chunks = list(_time_chunks(ds.sizes[time_name], time_chunk_size))
         batch_size = int(config.inference.get("batch_size", 1))
+        cpu_workers = _cpu_workers(config)
         fill_values = np.asarray(norm.get("edge_fill_values", norm["X_mean"]), dtype="float32")
         means = np.asarray(norm["X_mean"], dtype="float32")[None, :, None, None]
         stds = np.asarray(norm["X_std"], dtype="float32")[None, :, None, None]
@@ -204,7 +255,13 @@ def run_infer(config: Config, force: bool = False, progress: bool = False) -> Pa
 
         from netCDF4 import Dataset
 
-        with Dataset(destination, "a") as result:
+        pool = ProcessPoolExecutor(
+            max_workers=cpu_workers,
+            mp_context=get_context("spawn"),
+            initializer=_init_regrid_worker,
+            initargs=(str(source_path), str(target_grid_path)),
+        )
+        with pool, Dataset(destination, "a") as result:
             output_variables = {
                 channel.removesuffix("_era5"): result.createVariable(
                     channel.removesuffix("_era5"),
@@ -231,9 +288,12 @@ def run_infer(config: Config, force: bool = False, progress: bool = False) -> Pa
                     ),
                     dtype="float32",
                 )
-                for index, channel in enumerate(config.data["input_channels"]):
-                    variable = channel.removesuffix("_gcm")
-                    x[:, index] = regridder(ds[variable].isel({time_name: time_slice})).values
+                tasks = [
+                    (channel.removesuffix("_gcm"), time_name, time_slice.start, time_slice.stop)
+                    for channel in config.data["input_channels"]
+                ]
+                for index, mapped in enumerate(pool.map(_regrid_channel, tasks)):
+                    x[:, index] = mapped
                     x[:, index] = np.nan_to_num(
                         x[:, index], nan=float(fill_values[index]), copy=False
                     )
@@ -266,6 +326,7 @@ def run_infer(config: Config, force: bool = False, progress: bool = False) -> Pa
             "device": str(device),
             "batch_size": batch_size,
             "time_chunk_size": time_chunk_size,
+            "cpu_workers": cpu_workers,
             "regridding": "xesmf_bilinear",
             "precipitation_inverse_transform": "expm1_clipped_at_zero",
         },
