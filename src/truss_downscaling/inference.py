@@ -87,6 +87,25 @@ class _ProgressBar:
         self.started_at = time.perf_counter()
         self.last_wall_time = self.started_at
         self.last_cpu_time = time.process_time()
+        self.nvml = None
+        self.gpu_handle = None
+        if self.device.type == "cuda":
+            try:
+                import pynvml
+
+                pynvml.nvmlInit()
+                index = self.device.index
+                if index is None:
+                    index = torch.cuda.current_device()
+                properties = torch.cuda.get_device_properties(index)
+                try:
+                    self.gpu_handle = pynvml.nvmlDeviceGetHandleByUUID(properties.uuid)
+                except pynvml.NVMLError:
+                    self.gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+                self.nvml = pynvml
+            except Exception:
+                self.nvml = None
+                self.gpu_handle = None
 
     def update(self, completed: int) -> None:
         now = time.perf_counter()
@@ -105,14 +124,13 @@ class _ProgressBar:
         ram = _process_ram_gib()
         ram_text = f"{ram:.1f}GiB" if ram is not None else "n/a"
         gpu_text = "n/a"
-        if self.device.type == "cuda":
-            allocated = torch.cuda.memory_allocated(self.device) / 1024**3
-            total = torch.cuda.get_device_properties(self.device).total_memory / 1024**3
+        if self.nvml is not None and self.gpu_handle is not None:
             try:
-                utilization = f"{torch.cuda.utilization(self.device)}%"
-            except (AttributeError, RuntimeError, ValueError):
-                utilization = "n/a"
-            gpu_text = f"{utilization} {allocated:.1f}/{total:.1f}GiB"
+                utilization = self.nvml.nvmlDeviceGetUtilizationRates(self.gpu_handle).gpu
+                memory = self.nvml.nvmlDeviceGetMemoryInfo(self.gpu_handle)
+                gpu_text = f"{utilization}% {memory.used / 1024**3:.1f}/{memory.total / 1024**3:.1f}GiB"
+            except self.nvml.NVMLError:
+                gpu_text = "n/a"
         end = "\n" if completed >= self.total else ""
         print(
             f"\rInference [{bar}] {completed}/{self.total} "
@@ -122,6 +140,10 @@ class _ProgressBar:
             file=self.stream,
             flush=True,
         )
+        if completed >= self.total and self.nvml is not None:
+            self.nvml.nvmlShutdown()
+            self.nvml = None
+            self.gpu_handle = None
 
 
 def run_infer(config: Config, force: bool = False, progress: bool = False) -> Path:

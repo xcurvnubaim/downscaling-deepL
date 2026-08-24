@@ -69,6 +69,15 @@ Install a CUDA-enabled PyTorch build separately using the command appropriate
 for the target CUDA runtime. The project does not pin a machine-specific CUDA
 wheel.
 
+The package pins PyTorch's public version to `2.11.0`. For a CUDA 12.8 driver,
+install the matching local build before the editable project install:
+
+```bash
+python -m pip install "torch==2.11.0+cu128" \
+  --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -e ".[test,tracking]"
+```
+
 ## Configuration
 
 Copy an example configuration and set the local NetCDF paths:
@@ -180,11 +189,10 @@ Reduce `time_chunk_size` if the process is terminated by the operating
 system's out-of-memory killer.
 
 The inference CLI displays progress, throughput, ETA, process CPU utilization,
-process RAM, GPU utilization, and allocated/total GPU memory by default. Use
-`--no-progress` for logs, scripts, or other non-interactive execution where
-progress updates are not wanted. GPU utilization can show `n/a` when the
-installed PyTorch build cannot query that driver metric; GPU memory remains
-available.
+process RAM, NVML GPU utilization, and device-wide used/total GPU memory by
+default. Use `--no-progress` for logs, scripts, or other non-interactive
+execution where progress updates are not wanted. GPU metrics show `n/a` when
+NVML cannot query the selected device.
 
 ## Data and preprocessing
 

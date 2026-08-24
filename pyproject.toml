@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,14 +9,28 @@ description = "Config-driven UKESM1 to ERA5 deep-learning downscaling pipeline"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
-dependencies = ["numpy", "pandas", "pyyaml", "xarray", "netcdf4", "torch"]
+dependencies = [
+    "numpy==2.5.2",
+    "pandas==3.0.5",
+    "pyyaml==6.0.3",
+    "xarray==2026.7.0",
+    "netcdf4==1.7.4",
+    "torch==2.11.0",
+    "nvidia-ml-py==13.610.43",
+]
 
 [project.optional-dependencies]
-data = ["xesmf"]
-plots = ["matplotlib", "cartopy"]
-tracking = ["wandb"]
-test = ["pytest"]
-all = ["xesmf", "matplotlib", "cartopy", "wandb", "pytest"]
+data = ["xesmf==0.9.2"]
+plots = ["matplotlib==3.11.1", "cartopy==0.25.0"]
+tracking = ["wandb==0.28.2"]
+test = ["pytest==9.1.1"]
+all = [
+    "xesmf==0.9.2",
+    "matplotlib==3.11.1",
+    "cartopy==0.25.0",
+    "wandb==0.28.2",
+    "pytest==9.1.1",
+]
 
 [project.scripts]
 truss-downscale = "truss_downscaling.cli:main"
