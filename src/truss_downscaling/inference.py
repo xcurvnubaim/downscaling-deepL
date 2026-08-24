@@ -93,11 +93,38 @@ def _time_chunks(length: int, chunk_size: int):
 
 
 def _cpu_workers(config: Config) -> int:
-    available = os.cpu_count() or 1
-    workers = int(config.inference.get("cpu_workers", min(3, available)))
+    workers = int(config.inference.get("cpu_workers", 1))
     if workers < 1:
         raise ValueError("inference.cpu_workers must be at least 1")
     return min(workers, len(config.data["input_channels"]))
+
+
+def _submit_regrid_chunk(pool, channels: list[str], time_name: str, time_slice: slice):
+    return [
+        pool.submit(
+            _regrid_channel,
+            (channel.removesuffix("_gcm"), time_name, time_slice.start, time_slice.stop),
+        )
+        for channel in channels
+    ]
+
+
+def _collect_regrid_chunk(
+    futures,
+    time_slice: slice,
+    channel_count: int,
+    height: int,
+    width: int,
+    fill_values: np.ndarray,
+) -> np.ndarray:
+    x = np.empty(
+        (time_slice.stop - time_slice.start, channel_count, height, width),
+        dtype="float32",
+    )
+    for index, future in enumerate(futures):
+        x[:, index] = future.result()
+        np.nan_to_num(x[:, index], nan=float(fill_values[index]), copy=False)
+    return x
 
 
 def _process_ram_gib() -> float | None:
@@ -149,9 +176,14 @@ class _ProgressBar:
                 if index is None:
                     index = torch.cuda.current_device()
                 properties = torch.cuda.get_device_properties(index)
+                uuid = getattr(properties, "uuid", None)
                 try:
-                    self.gpu_handle = pynvml.nvmlDeviceGetHandleByUUID(properties.uuid)
-                except pynvml.NVMLError:
+                    self.gpu_handle = (
+                        pynvml.nvmlDeviceGetHandleByUUID(str(uuid)) if uuid is not None else None
+                    )
+                except (pynvml.NVMLError, TypeError):
+                    self.gpu_handle = None
+                if self.gpu_handle is None:
                     self.gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(index)
                 self.nvml = pynvml
             except Exception:
@@ -277,26 +309,30 @@ def run_infer(config: Config, force: bool = False, progress: bool = False) -> Pa
                 )
                 for channel in config.data["target_channels"]
             }
-            for time_slice in chunks:
-                chunk_length = time_slice.stop - time_slice.start
-                x = np.empty(
-                    (
-                        chunk_length,
-                        len(config.data["input_channels"]),
-                        target_grid.sizes[target_lat],
-                        target_grid.sizes[target_lon],
-                    ),
-                    dtype="float32",
+            chunk_iterator = iter(chunks)
+            time_slice = next(chunk_iterator, None)
+            futures = (
+                _submit_regrid_chunk(pool, config.data["input_channels"], time_name, time_slice)
+                if time_slice is not None
+                else []
+            )
+            while time_slice is not None:
+                x = _collect_regrid_chunk(
+                    futures,
+                    time_slice,
+                    len(config.data["input_channels"]),
+                    target_grid.sizes[target_lat],
+                    target_grid.sizes[target_lon],
+                    fill_values,
                 )
-                tasks = [
-                    (channel.removesuffix("_gcm"), time_name, time_slice.start, time_slice.stop)
-                    for channel in config.data["input_channels"]
-                ]
-                for index, mapped in enumerate(pool.map(_regrid_channel, tasks)):
-                    x[:, index] = mapped
-                    x[:, index] = np.nan_to_num(
-                        x[:, index], nan=float(fill_values[index]), copy=False
+                next_slice = next(chunk_iterator, None)
+                next_futures = (
+                    _submit_regrid_chunk(
+                        pool, config.data["input_channels"], time_name, next_slice
                     )
+                    if next_slice is not None
+                    else []
+                )
                 if norm.get("log1p_input_applied"):
                     pr_index = int(norm["pr_index"])
                     x[:, pr_index] = np.log1p(np.maximum(x[:, pr_index], 0))
@@ -313,6 +349,8 @@ def run_infer(config: Config, force: bool = False, progress: bool = False) -> Pa
                     output_variables[variable][time_slice, :, :] = prediction[:, index]
                 if progress_bar is not None:
                     progress_bar.update(time_slice.stop)
+                time_slice = next_slice
+                futures = next_futures
     mark_success(
         output,
         {

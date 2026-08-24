@@ -11,6 +11,7 @@ from truss_downscaling import cli
 from truss_downscaling.config import load_config
 from truss_downscaling.evaluation import run_evaluate
 from truss_downscaling.inference import (
+    _collect_regrid_chunk,
     _cpu_workers,
     _predict_in_batches,
     _ProgressBar,
@@ -66,6 +67,30 @@ def test_inference_cpu_workers_are_capped_by_channel_count(tmp_path):
     config.inference["cpu_workers"] = 8
 
     assert _cpu_workers(config) == 3
+
+
+def test_collect_regrid_chunk_preserves_channel_order_and_fills_nan():
+    class Future:
+        def __init__(self, value):
+            self.value = value
+
+        def result(self):
+            return self.value
+
+    first = np.ones((2, 2, 2), dtype=np.float32)
+    second = np.full((2, 2, 2), 2, dtype=np.float32)
+    second[0, 0, 0] = np.nan
+    result = _collect_regrid_chunk(
+        [Future(first), Future(second)],
+        slice(0, 2),
+        channel_count=2,
+        height=2,
+        width=2,
+        fill_values=np.array([10, 20], dtype=np.float32),
+    )
+
+    assert np.array_equal(result[:, 0], first)
+    assert result[0, 1, 0, 0] == 20
 
 
 def test_inference_progress_bar_reports_completion(monkeypatch):
