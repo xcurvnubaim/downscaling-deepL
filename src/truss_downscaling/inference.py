@@ -5,6 +5,7 @@ import os
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
+from collections import deque
 from datetime import datetime, timezone
 from multiprocessing import get_context
 from pathlib import Path
@@ -23,13 +24,21 @@ _WORKER_SOURCE: xr.Dataset | None = None
 _WORKER_REGRIDDER = None
 
 
-def _init_regrid_worker(source_path: str, target_grid_path: str) -> None:
+def _init_regrid_worker(
+    source_path: str,
+    target_grid_path: str,
+    variables: list[str],
+    preload_source: bool,
+) -> None:
     global _WORKER_SOURCE, _WORKER_REGRIDDER
 
     import xesmf as xe
 
-    _WORKER_SOURCE = xr.open_dataset(source_path)
+    _WORKER_SOURCE = xr.open_dataset(source_path)[variables]
     target_grid = xr.open_dataset(target_grid_path)
+    if preload_source:
+        _WORKER_SOURCE.load()
+        target_grid.load()
     _WORKER_REGRIDDER = xe.Regridder(
         _WORKER_SOURCE, target_grid, method="bilinear", periodic=False
     )
@@ -97,6 +106,13 @@ def _cpu_workers(config: Config) -> int:
     if workers < 1:
         raise ValueError("inference.cpu_workers must be at least 1")
     return min(workers, len(config.data["input_channels"]))
+
+
+def _prefetch_chunks(config: Config) -> int:
+    depth = int(config.inference.get("prefetch_chunks", 3))
+    if depth < 1:
+        raise ValueError("inference.prefetch_chunks must be at least 1")
+    return depth
 
 
 def _submit_regrid_chunk(pool, channels: list[str], time_name: str, time_slice: slice):
@@ -272,6 +288,8 @@ def run_infer(config: Config, force: bool = False, progress: bool = False) -> Pa
         chunks = list(_time_chunks(ds.sizes[time_name], time_chunk_size))
         batch_size = int(config.inference.get("batch_size", 1))
         cpu_workers = _cpu_workers(config)
+        prefetch_chunks = _prefetch_chunks(config)
+        preload_source = bool(config.inference.get("preload_source", True))
         fill_values = np.asarray(norm.get("edge_fill_values", norm["X_mean"]), dtype="float32")
         means = np.asarray(norm["X_mean"], dtype="float32")[None, :, None, None]
         stds = np.asarray(norm["X_std"], dtype="float32")[None, :, None, None]
@@ -291,7 +309,12 @@ def run_infer(config: Config, force: bool = False, progress: bool = False) -> Pa
             max_workers=cpu_workers,
             mp_context=get_context("spawn"),
             initializer=_init_regrid_worker,
-            initargs=(str(source_path), str(target_grid_path)),
+            initargs=(
+                str(source_path),
+                str(target_grid_path),
+                [channel.removesuffix("_gcm") for channel in config.data["input_channels"]],
+                preload_source,
+            ),
         )
         with pool, Dataset(destination, "a") as result:
             output_variables = {
@@ -310,13 +333,21 @@ def run_infer(config: Config, force: bool = False, progress: bool = False) -> Pa
                 for channel in config.data["target_channels"]
             }
             chunk_iterator = iter(chunks)
-            time_slice = next(chunk_iterator, None)
-            futures = (
-                _submit_regrid_chunk(pool, config.data["input_channels"], time_name, time_slice)
-                if time_slice is not None
-                else []
-            )
-            while time_slice is not None:
+            pending = deque()
+            for _ in range(prefetch_chunks):
+                queued_slice = next(chunk_iterator, None)
+                if queued_slice is None:
+                    break
+                pending.append(
+                    (
+                        queued_slice,
+                        _submit_regrid_chunk(
+                            pool, config.data["input_channels"], time_name, queued_slice
+                        ),
+                    )
+                )
+            while pending:
+                time_slice, futures = pending.popleft()
                 x = _collect_regrid_chunk(
                     futures,
                     time_slice,
@@ -326,13 +357,15 @@ def run_infer(config: Config, force: bool = False, progress: bool = False) -> Pa
                     fill_values,
                 )
                 next_slice = next(chunk_iterator, None)
-                next_futures = (
-                    _submit_regrid_chunk(
-                        pool, config.data["input_channels"], time_name, next_slice
+                if next_slice is not None:
+                    pending.append(
+                        (
+                            next_slice,
+                            _submit_regrid_chunk(
+                                pool, config.data["input_channels"], time_name, next_slice
+                            ),
+                        )
                     )
-                    if next_slice is not None
-                    else []
-                )
                 if norm.get("log1p_input_applied"):
                     pr_index = int(norm["pr_index"])
                     x[:, pr_index] = np.log1p(np.maximum(x[:, pr_index], 0))
@@ -349,8 +382,6 @@ def run_infer(config: Config, force: bool = False, progress: bool = False) -> Pa
                     output_variables[variable][time_slice, :, :] = prediction[:, index]
                 if progress_bar is not None:
                     progress_bar.update(time_slice.stop)
-                time_slice = next_slice
-                futures = next_futures
     mark_success(
         output,
         {
@@ -365,6 +396,8 @@ def run_infer(config: Config, force: bool = False, progress: bool = False) -> Pa
             "batch_size": batch_size,
             "time_chunk_size": time_chunk_size,
             "cpu_workers": cpu_workers,
+            "prefetch_chunks": prefetch_chunks,
+            "preload_source": preload_source,
             "regridding": "xesmf_bilinear",
             "precipitation_inverse_transform": "expm1_clipped_at_zero",
         },

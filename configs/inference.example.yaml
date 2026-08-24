@@ -24,3 +24,5 @@ inference:
   batch_size: 1
   time_chunk_size: 32
   cpu_workers: 1
+  preload_source: true
+  prefetch_chunks: 3

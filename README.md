@@ -184,6 +184,8 @@ inference:
   batch_size: 1
   time_chunk_size: 32
   cpu_workers: 1
+  preload_source: true
+  prefetch_chunks: 3
 ```
 
 Reduce `time_chunk_size` if the process is terminated by the operating
@@ -192,6 +194,14 @@ while the GPU predicts and writes the current chunk. `cpu_workers` controls the
 isolated xESMF preparation processes and is capped at three. The default is
 `1` because parallel channel regridding can be slower on compressed NetCDF or
 shared storage; benchmark `2` and `3` for the target machine.
+
+`preload_source` loads the low-resolution variables into each regridding
+worker once, avoiding repeated compressed NetCDF reads. `prefetch_chunks`
+controls the bounded queue of target-grid chunks prepared ahead of the GPU.
+Increasing it can absorb temporary CPU or storage stalls but cannot improve
+steady-state throughput when regridding is consistently slower than inference.
+RAM use grows with both `prefetch_chunks` and `time_chunk_size`; do not preload
+the full regridded 75-year target-grid dataset.
 
 The inference CLI displays progress, throughput, ETA, process CPU utilization,
 process RAM, NVML GPU utilization, and device-wide used/total GPU memory by

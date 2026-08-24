@@ -15,6 +15,7 @@ from truss_downscaling.inference import (
     _cpu_workers,
     _predict_in_batches,
     _ProgressBar,
+    _prefetch_chunks,
     _time_chunks,
     _versioned_output,
 )
@@ -67,6 +68,13 @@ def test_inference_cpu_workers_are_capped_by_channel_count(tmp_path):
     config.inference["cpu_workers"] = 8
 
     assert _cpu_workers(config) == 3
+
+
+def test_inference_prefetch_depth_is_configurable(tmp_path):
+    config = load_config(_smoke_config(tmp_path))
+    config.inference["prefetch_chunks"] = 5
+
+    assert _prefetch_chunks(config) == 5
 
 
 def test_collect_regrid_chunk_preserves_channel_order_and_fills_nan():
