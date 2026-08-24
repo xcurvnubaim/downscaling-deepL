@@ -160,9 +160,11 @@ truss-downscale infer --config configs/inference.example.yaml \
 ```
 
 The output filename comes from `scenario.climate_scenario` and
-`scenario.member` in the configuration, not from the input filename. Inference
-reuses an existing output unless `--force` is supplied, and prints the output
-path in either case.
+`scenario.member` in the configuration, not from the input filename. Every
+invocation creates a UTC timestamped version under
+`runs/<run-id>/inference/<timestamp>/` and prints the resulting NetCDF path.
+Each version also records the exact input, target grid, and checkpoint in its
+manifest.
 
 ## Data and preprocessing
 

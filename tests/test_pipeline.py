@@ -1,5 +1,6 @@
 import json
 import sys
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -9,7 +10,7 @@ import torch
 from truss_downscaling import cli
 from truss_downscaling.config import load_config
 from truss_downscaling.evaluation import run_evaluate
-from truss_downscaling.inference import _predict_in_batches
+from truss_downscaling.inference import _predict_in_batches, _versioned_output
 from truss_downscaling import preprocessing
 from truss_downscaling.preprocessing import run_preprocess
 from truss_downscaling.models.residual_unet import ResidualUNet
@@ -36,6 +37,18 @@ def test_inference_processes_time_steps_in_batches():
 
     assert seen_batch_sizes == [2, 2, 1]
     assert np.array_equal(prediction, inputs + 1)
+
+
+def test_inference_output_is_timestamp_versioned(tmp_path):
+    config = load_config(_smoke_config(tmp_path))
+    config.scenario.update({"climate_scenario": "ssp245", "member": "r1i1p1f2"})
+
+    output, destination = _versioned_output(
+        config, datetime(2026, 8, 25, 12, 34, 56, 123456, tzinfo=timezone.utc)
+    )
+
+    assert output == config.output_root / "inference" / "20260825T123456.123456Z"
+    assert destination == output / "ssp245_r1i1p1f2.nc"
 
 
 def test_config_imports_python_model():

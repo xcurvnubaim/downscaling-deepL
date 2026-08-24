@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -47,6 +48,13 @@ def _predict_in_batches(
     return prediction
 
 
+def _versioned_output(config: Config, created_at: datetime) -> tuple[Path, Path]:
+    version = created_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    output = config.output_root / "inference" / version
+    name = f"{config.scenario.get('climate_scenario', 'scenario')}_{config.scenario.get('member', 'member')}.nc"
+    return output, output / name
+
+
 def run_infer(config: Config, force: bool = False) -> Path:
     checkpoint_path = _path(config, "checkpoint")
     source_path = _path(config, "gcm_file")
@@ -56,12 +64,9 @@ def run_infer(config: Config, force: bool = False) -> Path:
             f"inference requires source, target grid, and checkpoint: "
             f"{source_path}, {target_grid_path}, {checkpoint_path}"
         )
-    output = config.output_root / "inference"
+    created_at = datetime.now(timezone.utc)
+    output, destination = _versioned_output(config, created_at)
     output.mkdir(parents=True, exist_ok=True)
-    name = f"{config.scenario.get('climate_scenario', 'scenario')}_{config.scenario.get('member', 'member')}.nc"
-    destination = output / name
-    if destination.exists() and not force:
-        return destination
 
     device = _resolve_device(config)
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -131,7 +136,11 @@ def run_infer(config: Config, force: bool = False) -> Path:
         output,
         {
             "file": str(destination),
+            "version": output.name,
+            "created_at": created_at.isoformat(),
             "scenario": config.scenario,
+            "source": str(source_path),
+            "target_grid": str(target_grid_path),
             "checkpoint": str(checkpoint_path),
             "device": str(device),
             "regridding": "xesmf_bilinear",
