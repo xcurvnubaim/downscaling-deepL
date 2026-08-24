@@ -55,6 +55,13 @@ def _versioned_output(config: Config, created_at: datetime) -> tuple[Path, Path]
     return output, output / name
 
 
+def _time_chunks(length: int, chunk_size: int):
+    if chunk_size < 1:
+        raise ValueError("inference.time_chunk_size must be at least 1")
+    for start in range(0, length, chunk_size):
+        yield slice(start, min(start + chunk_size, length))
+
+
 def run_infer(config: Config, force: bool = False) -> Path:
     checkpoint_path = _path(config, "checkpoint")
     source_path = _path(config, "gcm_file")
@@ -91,47 +98,74 @@ def run_infer(config: Config, force: bool = False) -> Path:
         ) from error
 
     with xr.open_dataset(source_path) as ds, xr.open_dataset(target_grid_path) as target_grid:
-        lat_name = "lat" if "lat" in ds.coords else "latitude"
-        lon_name = "lon" if "lon" in ds.coords else "longitude"
         time_name = "time" if "time" in ds.coords else "date"
         target_lat = "lat" if "lat" in target_grid.coords else "latitude"
         target_lon = "lon" if "lon" in target_grid.coords else "longitude"
         regridder = xe.Regridder(ds, target_grid, method="bilinear", periodic=False)
-        arrays = []
-        for channel in config.data["input_channels"]:
-            variable = channel.removesuffix("_gcm")
-            mapped = regridder(ds[variable]).values.astype("float32")
-            arrays.append(mapped)
-        x = np.stack(arrays, axis=1)
-        if norm.get("log1p_input_applied"):
-            pr_index = int(norm["pr_index"])
-            x[:, pr_index] = np.log1p(np.maximum(x[:, pr_index], 0))
+        time_chunk_size = int(config.inference.get("time_chunk_size", 32))
+        chunks = list(_time_chunks(ds.sizes[time_name], time_chunk_size))
+        batch_size = int(config.inference.get("batch_size", 1))
         fill_values = np.asarray(norm.get("edge_fill_values", norm["X_mean"]), dtype="float32")
-        for channel in range(x.shape[1]):
-            x[:, channel] = np.nan_to_num(x[:, channel], nan=float(fill_values[channel]))
         means = np.asarray(norm["X_mean"], dtype="float32")[None, :, None, None]
         stds = np.asarray(norm["X_std"], dtype="float32")[None, :, None, None]
-        batch_size = int(config.inference.get("batch_size", 1))
-        prediction = _predict_in_batches(model, (x - means) / stds, batch_size, device)
-        prediction = to_physical_targets(prediction, norm)
-        for index, channel in enumerate(config.data["target_channels"]):
-            variable = channel.removesuffix("_era5")
-            if variable == "hurs":
-                prediction[:, index] = np.clip(prediction[:, index], 0, 100)
-            elif variable == "pr":
-                prediction[:, index] = np.maximum(prediction[:, index], 0)
-        result = xr.Dataset(
-            {
-                channel.removesuffix("_era5"): ((time_name, target_lat, target_lon), prediction[:, index])
-                for index, channel in enumerate(config.data["target_channels"])
-            },
+        coordinates = xr.Dataset(
             coords={
                 time_name: ds[time_name],
                 target_lat: target_grid[target_lat],
                 target_lon: target_grid[target_lon],
             },
         )
-        result.to_netcdf(destination)
+        coordinates.to_netcdf(destination, unlimited_dims=[time_name])
+
+        from netCDF4 import Dataset
+
+        with Dataset(destination, "a") as result:
+            output_variables = {
+                channel.removesuffix("_era5"): result.createVariable(
+                    channel.removesuffix("_era5"),
+                    "f4",
+                    (time_name, target_lat, target_lon),
+                    zlib=True,
+                    complevel=4,
+                    chunksizes=(
+                        min(time_chunk_size, ds.sizes[time_name]),
+                        target_grid.sizes[target_lat],
+                        target_grid.sizes[target_lon],
+                    ),
+                )
+                for channel in config.data["target_channels"]
+            }
+            for time_slice in chunks:
+                chunk_length = time_slice.stop - time_slice.start
+                x = np.empty(
+                    (
+                        chunk_length,
+                        len(config.data["input_channels"]),
+                        target_grid.sizes[target_lat],
+                        target_grid.sizes[target_lon],
+                    ),
+                    dtype="float32",
+                )
+                for index, channel in enumerate(config.data["input_channels"]):
+                    variable = channel.removesuffix("_gcm")
+                    x[:, index] = regridder(ds[variable].isel({time_name: time_slice})).values
+                    x[:, index] = np.nan_to_num(
+                        x[:, index], nan=float(fill_values[index]), copy=False
+                    )
+                if norm.get("log1p_input_applied"):
+                    pr_index = int(norm["pr_index"])
+                    x[:, pr_index] = np.log1p(np.maximum(x[:, pr_index], 0))
+                x -= means
+                x /= stds
+                prediction = _predict_in_batches(model, x, batch_size, device)
+                prediction = to_physical_targets(prediction, norm)
+                for index, channel in enumerate(config.data["target_channels"]):
+                    variable = channel.removesuffix("_era5")
+                    if variable == "hurs":
+                        prediction[:, index] = np.clip(prediction[:, index], 0, 100)
+                    elif variable == "pr":
+                        prediction[:, index] = np.maximum(prediction[:, index], 0)
+                    output_variables[variable][time_slice, :, :] = prediction[:, index]
     mark_success(
         output,
         {
@@ -143,6 +177,8 @@ def run_infer(config: Config, force: bool = False) -> Path:
             "target_grid": str(target_grid_path),
             "checkpoint": str(checkpoint_path),
             "device": str(device),
+            "batch_size": batch_size,
+            "time_chunk_size": time_chunk_size,
             "regridding": "xesmf_bilinear",
             "precipitation_inverse_transform": "expm1_clipped_at_zero",
         },

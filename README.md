@@ -166,6 +166,19 @@ invocation creates a UTC timestamped version under
 Each version also records the exact input, target grid, and checkpoint in its
 manifest.
 
+Long time series are regridded, predicted, and written incrementally. Control
+CPU RAM independently from the GPU batch size with:
+
+```yaml
+inference:
+  device: cuda
+  batch_size: 1
+  time_chunk_size: 32
+```
+
+Reduce `time_chunk_size` if the process is terminated by the operating
+system's out-of-memory killer.
+
 ## Data and preprocessing
 
 The current pipeline uses three variables:

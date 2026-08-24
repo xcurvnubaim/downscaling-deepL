@@ -10,7 +10,7 @@ import torch
 from truss_downscaling import cli
 from truss_downscaling.config import load_config
 from truss_downscaling.evaluation import run_evaluate
-from truss_downscaling.inference import _predict_in_batches, _versioned_output
+from truss_downscaling.inference import _predict_in_batches, _time_chunks, _versioned_output
 from truss_downscaling import preprocessing
 from truss_downscaling.preprocessing import run_preprocess
 from truss_downscaling.models.residual_unet import ResidualUNet
@@ -49,6 +49,10 @@ def test_inference_output_is_timestamp_versioned(tmp_path):
 
     assert output == config.output_root / "inference" / "20260825T123456.123456Z"
     assert destination == output / "ssp245_r1i1p1f2.nc"
+
+
+def test_inference_splits_long_time_series_into_chunks():
+    assert list(_time_chunks(10, 4)) == [slice(0, 4), slice(4, 8), slice(8, 10)]
 
 
 def test_config_imports_python_model():
