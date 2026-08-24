@@ -18,15 +18,18 @@ def main() -> None:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--restart", action="store_true", help="start training from fresh weights")
     parser.add_argument("--input-file", help="override data.gcm_file for inference")
-    parser.add_argument("--artifact", help="W&B model artifact: ENTITY/PROJECT/NAME:ALIAS")
+    checkpoint_source = parser.add_mutually_exclusive_group()
+    checkpoint_source.add_argument("--checkpoint", help="local best.pt checkpoint for inference")
+    checkpoint_source.add_argument("--artifact", help="W&B model artifact: ENTITY/PROJECT/NAME:ALIAS")
     parser.add_argument(
         "--artifact-dir",
-        default="artifacts",
-        help="directory for downloaded W&B artifacts (default: artifacts)",
+        help="download directory used with --artifact (default: artifacts)",
     )
     args = parser.parse_args()
-    if args.stage != "infer" and (args.input_file or args.artifact):
-        parser.error("--input-file and --artifact are only valid for the infer stage")
+    if args.stage != "infer" and (args.input_file or args.checkpoint or args.artifact):
+        parser.error("--input-file, --checkpoint, and --artifact are only valid for the infer stage")
+    if args.artifact_dir and not args.artifact:
+        parser.error("--artifact-dir requires --artifact; use --checkpoint for a local best.pt")
     config = load_config(args.config)
     if args.stage in ("preprocess", "run"):
         run_preprocess(config, force=args.force)
@@ -37,10 +40,13 @@ def main() -> None:
     if args.stage == "infer":
         if args.input_file:
             config.data["gcm_file"] = str(Path(args.input_file).resolve())
+        if args.checkpoint:
+            config.data["checkpoint"] = str(Path(args.checkpoint).resolve())
         if args.artifact:
-            checkpoint = download_wandb_checkpoint(args.artifact, args.artifact_dir)
+            checkpoint = download_wandb_checkpoint(args.artifact, args.artifact_dir or "artifacts")
             config.data["checkpoint"] = str(checkpoint)
-        run_infer(config, force=args.force)
+        destination = run_infer(config, force=args.force)
+        print(destination.resolve())
 
 
 if __name__ == "__main__":

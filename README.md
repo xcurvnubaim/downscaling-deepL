@@ -22,7 +22,7 @@ cd /tmp
 curl -L -O \
   "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh"
 bash Miniforge3-Linux-x86_64.sh
-~/miniforge3/bin/conda init zsh
+~/miniforge3/bin/conda init bash
 source ~/miniforge3/etc/profile.d/conda.sh
 mamba --version
 ```
@@ -136,6 +136,33 @@ For future inference, use a production checkpoint:
 ```bash
 truss-downscale infer --config configs/inference.example.yaml
 ```
+
+The input NetCDF and a W&B checkpoint artifact can be supplied without editing
+the configuration:
+
+```bash
+truss-downscale infer --config configs/inference.example.yaml \
+  --input-file data/UKESM1_future.nc \
+  --artifact ENTITY/truss-downscaling/production-r1-model:best
+```
+
+Artifacts are downloaded under `artifacts/` by default. Use `--artifact-dir`
+to select another location. W&B authentication and the `tracking` extra are
+required for artifact downloads.
+
+Use `--checkpoint` instead when `best.pt` is already available locally:
+
+```bash
+truss-downscale infer --config configs/inference.example.yaml \
+  --input-file data/UKESM1_future.nc \
+  --checkpoint artifact/dev-r1-baseline-model/best.pt \
+  --force
+```
+
+The output filename comes from `scenario.climate_scenario` and
+`scenario.member` in the configuration, not from the input filename. Inference
+reuses an existing output unless `--force` is supplied, and prints the output
+path in either case.
 
 ## Data and preprocessing
 

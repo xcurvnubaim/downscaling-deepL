@@ -58,6 +58,7 @@ def test_inference_cli_overrides_input_and_downloads_artifact(tmp_path, monkeypa
         captured["gcm_file"] = config.data["gcm_file"]
         captured["checkpoint"] = config.data["checkpoint"]
         captured["force"] = force
+        return tmp_path / "prediction.nc"
 
     monkeypatch.setattr(cli, "download_wandb_checkpoint", download)
     monkeypatch.setattr(cli, "run_infer", infer)
@@ -88,6 +89,35 @@ def test_inference_cli_overrides_input_and_downloads_artifact(tmp_path, monkeypa
         "checkpoint": str(checkpoint),
         "force": True,
     }
+
+
+def test_inference_cli_accepts_local_checkpoint(tmp_path, monkeypatch, capsys):
+    config_path = _smoke_config(tmp_path)
+    checkpoint = tmp_path / "artifact" / "best.pt"
+    captured = {}
+
+    def infer(config, force):
+        captured["checkpoint"] = config.data["checkpoint"]
+        return tmp_path / "prediction.nc"
+
+    monkeypatch.setattr(cli, "run_infer", infer)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "truss-downscale",
+            "infer",
+            "--config",
+            str(config_path),
+            "--checkpoint",
+            str(checkpoint),
+        ],
+    )
+
+    cli.main()
+
+    assert captured["checkpoint"] == str(checkpoint.resolve())
+    assert capsys.readouterr().out.strip() == str((tmp_path / "prediction.nc").resolve())
 
 
 def test_training_requires_preprocessing(tmp_path):
