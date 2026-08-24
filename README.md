@@ -179,6 +179,13 @@ inference:
 Reduce `time_chunk_size` if the process is terminated by the operating
 system's out-of-memory killer.
 
+The inference CLI displays progress, throughput, ETA, process CPU utilization,
+process RAM, GPU utilization, and allocated/total GPU memory by default. Use
+`--no-progress` for logs, scripts, or other non-interactive execution where
+progress updates are not wanted. GPU utilization can show `n/a` when the
+installed PyTorch build cannot query that driver metric; GPU memory remains
+available.
+
 ## Data and preprocessing
 
 The current pipeline uses three variables:

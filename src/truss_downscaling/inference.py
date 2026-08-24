@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TextIO
 
 import numpy as np
 import torch
@@ -62,7 +66,65 @@ def _time_chunks(length: int, chunk_size: int):
         yield slice(start, min(start + chunk_size, length))
 
 
-def run_infer(config: Config, force: bool = False) -> Path:
+def _process_ram_gib() -> float | None:
+    try:
+        resident_pages = int(Path("/proc/self/statm").read_text().split()[1])
+        return resident_pages * os.sysconf("SC_PAGE_SIZE") / 1024**3
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+class _ProgressBar:
+    def __init__(
+        self,
+        total: int,
+        device: torch.device = torch.device("cpu"),
+        stream: TextIO = sys.stderr,
+    ) -> None:
+        self.total = total
+        self.device = device
+        self.stream = stream
+        self.started_at = time.perf_counter()
+        self.last_wall_time = self.started_at
+        self.last_cpu_time = time.process_time()
+
+    def update(self, completed: int) -> None:
+        now = time.perf_counter()
+        cpu_time = time.process_time()
+        elapsed = now - self.started_at
+        interval = now - self.last_wall_time
+        cpu_percent = (cpu_time - self.last_cpu_time) / interval * 100 if interval else 0.0
+        self.last_wall_time = now
+        self.last_cpu_time = cpu_time
+        fraction = completed / self.total if self.total else 1.0
+        width = 30
+        filled = min(width, int(width * fraction))
+        rate = completed / elapsed if elapsed else 0.0
+        remaining = (self.total - completed) / rate if rate else 0.0
+        bar = "#" * filled + "-" * (width - filled)
+        ram = _process_ram_gib()
+        ram_text = f"{ram:.1f}GiB" if ram is not None else "n/a"
+        gpu_text = "n/a"
+        if self.device.type == "cuda":
+            allocated = torch.cuda.memory_allocated(self.device) / 1024**3
+            total = torch.cuda.get_device_properties(self.device).total_memory / 1024**3
+            try:
+                utilization = f"{torch.cuda.utilization(self.device)}%"
+            except (AttributeError, RuntimeError, ValueError):
+                utilization = "n/a"
+            gpu_text = f"{utilization} {allocated:.1f}/{total:.1f}GiB"
+        end = "\n" if completed >= self.total else ""
+        print(
+            f"\rInference [{bar}] {completed}/{self.total} "
+            f"({fraction:6.2%}) {rate:5.1f} steps/s ETA {remaining:6.0f}s "
+            f"CPU {cpu_percent:5.1f}% RAM {ram_text} GPU {gpu_text}",
+            end=end,
+            file=self.stream,
+            flush=True,
+        )
+
+
+def run_infer(config: Config, force: bool = False, progress: bool = False) -> Path:
     checkpoint_path = _path(config, "checkpoint")
     source_path = _path(config, "gcm_file")
     target_grid_path = _path(config, "target_grid_file")
@@ -116,6 +178,7 @@ def run_infer(config: Config, force: bool = False) -> Path:
             },
         )
         coordinates.to_netcdf(destination, unlimited_dims=[time_name])
+        progress_bar = _ProgressBar(ds.sizes[time_name], device=device) if progress else None
 
         from netCDF4 import Dataset
 
@@ -166,6 +229,8 @@ def run_infer(config: Config, force: bool = False) -> Path:
                     elif variable == "pr":
                         prediction[:, index] = np.maximum(prediction[:, index], 0)
                     output_variables[variable][time_slice, :, :] = prediction[:, index]
+                if progress_bar is not None:
+                    progress_bar.update(time_slice.stop)
     mark_success(
         output,
         {

@@ -10,7 +10,12 @@ import torch
 from truss_downscaling import cli
 from truss_downscaling.config import load_config
 from truss_downscaling.evaluation import run_evaluate
-from truss_downscaling.inference import _predict_in_batches, _time_chunks, _versioned_output
+from truss_downscaling.inference import (
+    _predict_in_batches,
+    _ProgressBar,
+    _time_chunks,
+    _versioned_output,
+)
 from truss_downscaling import preprocessing
 from truss_downscaling.preprocessing import run_preprocess
 from truss_downscaling.models.residual_unet import ResidualUNet
@@ -55,6 +60,29 @@ def test_inference_splits_long_time_series_into_chunks():
     assert list(_time_chunks(10, 4)) == [slice(0, 4), slice(4, 8), slice(8, 10)]
 
 
+def test_inference_progress_bar_reports_completion(monkeypatch):
+    from io import StringIO
+
+    stream = StringIO()
+    progress = _ProgressBar(10, stream=stream)
+    monkeypatch.setattr(progress, "started_at", 0.0)
+    monkeypatch.setattr(progress, "last_wall_time", 0.0)
+    monkeypatch.setattr(progress, "last_cpu_time", 0.0)
+    monkeypatch.setattr("truss_downscaling.inference.time.perf_counter", lambda: 2.0)
+    monkeypatch.setattr("truss_downscaling.inference.time.process_time", lambda: 1.0)
+    monkeypatch.setattr("truss_downscaling.inference._process_ram_gib", lambda: 3.25)
+
+    progress.update(10)
+
+    output = stream.getvalue()
+    assert "10/10" in output
+    assert "100.00%" in output
+    assert "CPU  50.0%" in output
+    assert "RAM 3.2GiB" in output
+    assert "GPU n/a" in output
+    assert output.endswith("\n")
+
+
 def test_config_imports_python_model():
     config = load_config(Path(__file__).parents[1] / "configs/development.example.yaml")
     assert config.model_class() is ResidualUNet
@@ -71,10 +99,11 @@ def test_inference_cli_overrides_input_and_downloads_artifact(tmp_path, monkeypa
         captured["artifact_dir"] = output_root
         return checkpoint
 
-    def infer(config, force):
+    def infer(config, force, progress):
         captured["gcm_file"] = config.data["gcm_file"]
         captured["checkpoint"] = config.data["checkpoint"]
         captured["force"] = force
+        captured["progress"] = progress
         return tmp_path / "prediction.nc"
 
     monkeypatch.setattr(cli, "download_wandb_checkpoint", download)
@@ -105,6 +134,7 @@ def test_inference_cli_overrides_input_and_downloads_artifact(tmp_path, monkeypa
         "gcm_file": str(input_path.resolve()),
         "checkpoint": str(checkpoint),
         "force": True,
+        "progress": True,
     }
 
 
@@ -113,8 +143,9 @@ def test_inference_cli_accepts_local_checkpoint(tmp_path, monkeypatch, capsys):
     checkpoint = tmp_path / "artifact" / "best.pt"
     captured = {}
 
-    def infer(config, force):
+    def infer(config, force, progress):
         captured["checkpoint"] = config.data["checkpoint"]
+        captured["progress"] = progress
         return tmp_path / "prediction.nc"
 
     monkeypatch.setattr(cli, "run_infer", infer)
@@ -134,6 +165,7 @@ def test_inference_cli_accepts_local_checkpoint(tmp_path, monkeypatch, capsys):
     cli.main()
 
     assert captured["checkpoint"] == str(checkpoint.resolve())
+    assert captured["progress"] is True
     assert capsys.readouterr().out.strip() == str((tmp_path / "prediction.nc").resolve())
 
 

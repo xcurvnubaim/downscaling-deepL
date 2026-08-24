@@ -17,6 +17,7 @@ def main() -> None:
     parser.add_argument("--config", required=True)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--restart", action="store_true", help="start training from fresh weights")
+    parser.add_argument("--no-progress", action="store_true", help="disable inference progress bar")
     parser.add_argument("--input-file", help="override data.gcm_file for inference")
     checkpoint_source = parser.add_mutually_exclusive_group()
     checkpoint_source.add_argument("--checkpoint", help="local best.pt checkpoint for inference")
@@ -45,7 +46,7 @@ def main() -> None:
         if args.artifact:
             checkpoint = download_wandb_checkpoint(args.artifact, args.artifact_dir or "artifacts")
             config.data["checkpoint"] = str(checkpoint)
-        destination = run_infer(config, force=args.force)
+        destination = run_infer(config, force=args.force, progress=not args.no_progress)
         print(destination.resolve())
 
 
