@@ -29,6 +29,8 @@ class Config:
     def evaluation(self) -> dict[str, Any]: return self.raw.setdefault("evaluation", {})
     @property
     def scenario(self) -> dict[str, Any]: return self.raw.setdefault("scenario", {})
+    @property
+    def inference(self) -> dict[str, Any]: return self.raw.setdefault("inference", {})
 
     @property
     def output_root(self) -> Path:

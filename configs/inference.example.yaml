@@ -19,3 +19,5 @@ model:
     out_channels: 3
     depth: 4
     base_width: 64
+inference:
+  batch_size: 1

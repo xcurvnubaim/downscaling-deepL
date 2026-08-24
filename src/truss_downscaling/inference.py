@@ -20,6 +20,17 @@ def _path(config: Config, key: str) -> Path:
     return path if path.is_absolute() else (config.path.parent / path).resolve()
 
 
+def _predict_in_batches(model: torch.nn.Module, inputs: np.ndarray, batch_size: int) -> np.ndarray:
+    if batch_size < 1:
+        raise ValueError("inference.batch_size must be at least 1")
+    prediction = np.empty(inputs.shape, dtype="float32")
+    with torch.inference_mode():
+        for start in range(0, len(inputs), batch_size):
+            stop = min(start + batch_size, len(inputs))
+            prediction[start:stop] = model(torch.from_numpy(inputs[start:stop])).numpy()
+    return prediction
+
+
 def run_infer(config: Config, force: bool = False) -> Path:
     checkpoint_path = _path(config, "checkpoint")
     source_path = _path(config, "gcm_file")
@@ -78,8 +89,8 @@ def run_infer(config: Config, force: bool = False) -> Path:
             x[:, channel] = np.nan_to_num(x[:, channel], nan=float(fill_values[channel]))
         means = np.asarray(norm["X_mean"], dtype="float32")[None, :, None, None]
         stds = np.asarray(norm["X_std"], dtype="float32")[None, :, None, None]
-        with torch.no_grad():
-            prediction = model(torch.from_numpy((x - means) / stds)).numpy()
+        batch_size = int(config.inference.get("batch_size", 1))
+        prediction = _predict_in_batches(model, (x - means) / stds, batch_size)
         prediction = to_physical_targets(prediction, norm)
         for index, channel in enumerate(config.data["target_channels"]):
             variable = channel.removesuffix("_era5")

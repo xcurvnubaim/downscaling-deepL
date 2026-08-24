@@ -8,6 +8,7 @@ import torch
 
 from truss_downscaling.config import load_config
 from truss_downscaling.evaluation import run_evaluate
+from truss_downscaling.inference import _predict_in_batches
 from truss_downscaling import preprocessing
 from truss_downscaling.preprocessing import run_preprocess
 from truss_downscaling.models.residual_unet import ResidualUNet
@@ -19,6 +20,21 @@ def test_model_preserves_era5_grid_shape():
     model = ResidualUNet(in_channels=3, out_channels=3, depth=2, base_width=4)
     result = model(torch.randn(1, 3, 181, 201))
     assert result.shape == (1, 3, 181, 201)
+
+
+def test_inference_processes_time_steps_in_batches():
+    seen_batch_sizes = []
+
+    class Model(torch.nn.Module):
+        def forward(self, inputs):
+            seen_batch_sizes.append(len(inputs))
+            return inputs + 1
+
+    inputs = np.zeros((5, 3, 2, 2), dtype=np.float32)
+    prediction = _predict_in_batches(Model(), inputs, batch_size=2)
+
+    assert seen_batch_sizes == [2, 2, 1]
+    assert np.array_equal(prediction, inputs + 1)
 
 
 def test_config_imports_python_model():
