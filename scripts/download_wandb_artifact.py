@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import wandb
+from truss_downscaling.artifacts import download_wandb_checkpoint
 
 
 def main() -> None:
@@ -23,14 +23,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    artifact = wandb.Api().artifact(args.artifact, type="model")
-    artifact_dir = Path(artifact.download(root=str(args.output))).resolve()
-    checkpoint = artifact_dir / "best.pt"
-    if not checkpoint.is_file():
-        raise FileNotFoundError(
-            f"artifact downloaded to {artifact_dir}, but it does not contain best.pt"
-        )
-
+    checkpoint = download_wandb_checkpoint(args.artifact, args.output)
     print(checkpoint)
 
 

@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from truss_downscaling import cli
 from truss_downscaling.config import load_config
 from truss_downscaling.evaluation import run_evaluate
 from truss_downscaling.inference import _predict_in_batches
@@ -31,7 +32,7 @@ def test_inference_processes_time_steps_in_batches():
             return inputs + 1
 
     inputs = np.zeros((5, 3, 2, 2), dtype=np.float32)
-    prediction = _predict_in_batches(Model(), inputs, batch_size=2)
+    prediction = _predict_in_batches(Model(), inputs, batch_size=2, device=torch.device("cpu"))
 
     assert seen_batch_sizes == [2, 2, 1]
     assert np.array_equal(prediction, inputs + 1)
@@ -40,6 +41,53 @@ def test_inference_processes_time_steps_in_batches():
 def test_config_imports_python_model():
     config = load_config(Path(__file__).parents[1] / "configs/development.example.yaml")
     assert config.model_class() is ResidualUNet
+
+
+def test_inference_cli_overrides_input_and_downloads_artifact(tmp_path, monkeypatch):
+    config_path = _smoke_config(tmp_path)
+    input_path = tmp_path / "future.nc"
+    checkpoint = tmp_path / "artifacts" / "best.pt"
+    captured = {}
+
+    def download(reference, output_root):
+        captured["artifact"] = reference
+        captured["artifact_dir"] = output_root
+        return checkpoint
+
+    def infer(config, force):
+        captured["gcm_file"] = config.data["gcm_file"]
+        captured["checkpoint"] = config.data["checkpoint"]
+        captured["force"] = force
+
+    monkeypatch.setattr(cli, "download_wandb_checkpoint", download)
+    monkeypatch.setattr(cli, "run_infer", infer)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "truss-downscale",
+            "infer",
+            "--config",
+            str(config_path),
+            "--input-file",
+            str(input_path),
+            "--artifact",
+            "entity/project/model:best",
+            "--artifact-dir",
+            str(tmp_path / "downloads"),
+            "--force",
+        ],
+    )
+
+    cli.main()
+
+    assert captured == {
+        "artifact": "entity/project/model:best",
+        "artifact_dir": str(tmp_path / "downloads"),
+        "gcm_file": str(input_path.resolve()),
+        "checkpoint": str(checkpoint),
+        "force": True,
+    }
 
 
 def test_training_requires_preprocessing(tmp_path):

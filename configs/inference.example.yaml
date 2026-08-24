@@ -20,4 +20,5 @@ model:
     depth: 4
     base_width: 64
 inference:
+  device: auto
   batch_size: 1

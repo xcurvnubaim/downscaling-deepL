@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
+from .artifacts import download_wandb_checkpoint
 from .config import load_config
 from .evaluation import run_evaluate
 from .inference import run_infer
@@ -15,7 +17,16 @@ def main() -> None:
     parser.add_argument("--config", required=True)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--restart", action="store_true", help="start training from fresh weights")
+    parser.add_argument("--input-file", help="override data.gcm_file for inference")
+    parser.add_argument("--artifact", help="W&B model artifact: ENTITY/PROJECT/NAME:ALIAS")
+    parser.add_argument(
+        "--artifact-dir",
+        default="artifacts",
+        help="directory for downloaded W&B artifacts (default: artifacts)",
+    )
     args = parser.parse_args()
+    if args.stage != "infer" and (args.input_file or args.artifact):
+        parser.error("--input-file and --artifact are only valid for the infer stage")
     config = load_config(args.config)
     if args.stage in ("preprocess", "run"):
         run_preprocess(config, force=args.force)
@@ -24,6 +35,11 @@ def main() -> None:
     if args.stage in ("evaluate", "run"):
         run_evaluate(config, force=args.force)
     if args.stage == "infer":
+        if args.input_file:
+            config.data["gcm_file"] = str(Path(args.input_file).resolve())
+        if args.artifact:
+            checkpoint = download_wandb_checkpoint(args.artifact, args.artifact_dir)
+            config.data["checkpoint"] = str(checkpoint)
         run_infer(config, force=args.force)
 
 

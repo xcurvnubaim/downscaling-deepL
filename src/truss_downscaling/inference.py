@@ -20,14 +20,30 @@ def _path(config: Config, key: str) -> Path:
     return path if path.is_absolute() else (config.path.parent / path).resolve()
 
 
-def _predict_in_batches(model: torch.nn.Module, inputs: np.ndarray, batch_size: int) -> np.ndarray:
+def _resolve_device(config: Config) -> torch.device:
+    requested = config.inference.get("device", "auto")
+    if requested == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(requested)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(f"requested inference device {requested!r}, but CUDA is unavailable")
+    return device
+
+
+def _predict_in_batches(
+    model: torch.nn.Module,
+    inputs: np.ndarray,
+    batch_size: int,
+    device: torch.device,
+) -> np.ndarray:
     if batch_size < 1:
         raise ValueError("inference.batch_size must be at least 1")
     prediction = np.empty(inputs.shape, dtype="float32")
     with torch.inference_mode():
         for start in range(0, len(inputs), batch_size):
             stop = min(start + batch_size, len(inputs))
-            prediction[start:stop] = model(torch.from_numpy(inputs[start:stop])).numpy()
+            batch = torch.from_numpy(inputs[start:stop]).to(device)
+            prediction[start:stop] = model(batch).cpu().numpy()
     return prediction
 
 
@@ -47,10 +63,11 @@ def run_infer(config: Config, force: bool = False) -> Path:
     if destination.exists() and not force:
         return destination
 
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    device = _resolve_device(config)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if int(checkpoint.get("checkpoint_version", 0)) != 2:
         raise RuntimeError("checkpoint uses an older format; retrain after regenerating preprocessing artifacts")
-    model = config.model_class()(**config.model.get("parameters", {}))
+    model = config.model_class()(**config.model.get("parameters", {})).to(device)
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
     norm = checkpoint.get("norm_stats")
@@ -90,7 +107,7 @@ def run_infer(config: Config, force: bool = False) -> Path:
         means = np.asarray(norm["X_mean"], dtype="float32")[None, :, None, None]
         stds = np.asarray(norm["X_std"], dtype="float32")[None, :, None, None]
         batch_size = int(config.inference.get("batch_size", 1))
-        prediction = _predict_in_batches(model, (x - means) / stds, batch_size)
+        prediction = _predict_in_batches(model, (x - means) / stds, batch_size, device)
         prediction = to_physical_targets(prediction, norm)
         for index, channel in enumerate(config.data["target_channels"]):
             variable = channel.removesuffix("_era5")
@@ -116,6 +133,7 @@ def run_infer(config: Config, force: bool = False) -> Path:
             "file": str(destination),
             "scenario": config.scenario,
             "checkpoint": str(checkpoint_path),
+            "device": str(device),
             "regridding": "xesmf_bilinear",
             "precipitation_inverse_transform": "expm1_clipped_at_zero",
         },
