@@ -291,6 +291,15 @@ def run_infer(config: Config, force: bool = False, progress: bool = False) -> Pa
         prefetch_chunks = _prefetch_chunks(config)
         preload_source = bool(config.inference.get("preload_source", True))
         fill_values = np.asarray(norm.get("edge_fill_values", norm["X_mean"]), dtype="float32")
+        if norm.get("log1p_input_applied"):
+            # edge_fill_values are stored in log1p space (preprocessing computes
+            # them from the transformed training data). This fill happens before
+            # the log1p below, so invert first and the two operations cancel:
+            # log1p(expm1(m)) == m, which is what training used as the border value.
+            fill_values = fill_values.copy()
+            fill_values[int(norm["pr_index"])] = np.expm1(
+                max(float(fill_values[int(norm["pr_index"])]), 0.0)
+            )
         means = np.asarray(norm["X_mean"], dtype="float32")[None, :, None, None]
         stds = np.asarray(norm["X_std"], dtype="float32")[None, :, None, None]
         coordinates = xr.Dataset(
