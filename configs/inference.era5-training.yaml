@@ -1,0 +1,30 @@
+run:
+  id: dev-r1-baseline
+  output_root: runs
+scenario:
+  mode: inference
+  # only used for the output filename and manifest; must match the input you feed in
+  climate_scenario: arise-sai-1p5
+  member: r1i1p1f2
+data:
+  gcm_file: /data/UKESM1_ssp245_r1i1p1f2_tasmax_hurs_pr_lowres_SEA_2015_2025.nc
+  target_grid_file: /data/ERA5_daily_tasmax_hurs_pr_heatindex_native_025deg_SEA_2015_2025.nc
+  # data.* paths are resolved relative to this file's directory (configs/),
+  # so ../runs/... points at <repo>/runs/...
+  checkpoint: ../runs/dev-r1-baseline/training/best.pt
+  input_channels: [tasmax_gcm, hurs_gcm, pr_gcm]
+  target_channels: [tasmax_era5, hurs_era5, pr_era5]
+model:
+  class_path: truss_downscaling.models.residual_unet.ResidualUNet
+  parameters:
+    in_channels: 3
+    out_channels: 3
+    depth: 4
+    base_width: 64
+inference:
+  device: auto
+  batch_size: 4
+  time_chunk_size: 32
+  cpu_workers: 1
+  preload_source: true
+  prefetch_chunks: 3
