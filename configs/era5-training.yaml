@@ -1,13 +1,13 @@
 run:
-  id: dev-r1-baseline
+  id: era5-to-era5
   output_root: runs
   seed: 42
 scenario:
   mode: development
-  climate_scenario: ssp245
-  member: r1i1p1f2
+  climate_scenario: era5
+  member: era5grid
 data:
-  gcm_file: /data/UKESM1_ssp245_r1i1p1f2_tasmax_hurs_pr_lowres_SEA_2015_2025.nc
+  gcm_file: /data/ERA5_daily_tasmax_hurs_pr_heatindex_sspgrid_036x27_SEA_2015_2025.nc
   era5_file: /data/ERA5_daily_tasmax_hurs_pr_heatindex_native_025deg_SEA_2015_2025.nc
   input_channels: [tasmax_gcm, hurs_gcm, pr_gcm]
   target_channels: [tasmax_era5, hurs_era5, pr_era5]
@@ -34,9 +34,9 @@ training:
   ssim_alpha: 0.84
   device: auto
 tracking:
-  enabled: false
-  project: truss-downscaling
-  run_name: dev-log1p
+  enabled: true
+  project: truss-downscaling-v2
+  run_name: downscale-v2.0
   log_every_n_steps: 10
   artifacts:
     enabled: true
