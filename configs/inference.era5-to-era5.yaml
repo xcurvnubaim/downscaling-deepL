@@ -1,0 +1,28 @@
+run:
+  id: era5-to-era5
+  output_root: runs
+scenario:
+  mode: inference
+  climate_scenario: era5
+  member: era5grid
+data:
+  # Same coarse ERA5 that the model was trained on: this is the reconstruction arm.
+  gcm_file: /data/ERA5_daily_tasmax_hurs_pr_heatindex_sspgrid_036x27_SEA_2015_2025.nc
+  target_grid_file: /data/ERA5_daily_tasmax_hurs_pr_heatindex_native_025deg_SEA_2015_2025.nc
+  checkpoint: ../runs/era5-to-era5/training/best.pt
+  input_channels: [tasmax_gcm, hurs_gcm, pr_gcm]
+  target_channels: [tasmax_era5, hurs_era5, pr_era5]
+model:
+  class_path: truss_downscaling.models.residual_unet.ResidualUNet
+  parameters:
+    in_channels: 3
+    out_channels: 3
+    depth: 4
+    base_width: 64
+inference:
+  device: auto
+  batch_size: 4
+  time_chunk_size: 32
+  cpu_workers: 1
+  preload_source: true
+  prefetch_chunks: 3
