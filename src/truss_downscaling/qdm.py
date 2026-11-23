@@ -29,6 +29,21 @@ Numerics: the per-cell search is vectorised with column offsets. ``_OFFSET`` is
 a power of two chosen so every ``value + column * _OFFSET`` sum stays below
 ``2**28``; float64 then resolves every float32 mantissa bit exactly, making the
 vectorised search bit-identical to a per-cell loop (verified in tests).
+
+Implementation choice (the F0 decision from the QDM plan, recorded here): the
+core is a small self-contained numpy implementation rather than ``xclim.sdba``
+because (a) this project pins exact dependency versions and the finalizer runs
+inside Kaggle kernels, where xclim's transitive dependency tree is a
+version-drift risk on the pinned stack; (b) the wet-day frequency adaptation
+must be deterministic and chunk-invariant — a fixed day/cell hash rather than
+random jitter — so every run and artifact is reproducible bit-for-bit; and
+(c) the mapping plugs directly into the streaming netCDF writer that inference
+uses. The accuracy burden of a hand-rolled implementation is paid once and
+kept automated: ``tests/test_qdm.py`` asserts bit-identity against a naive
+per-cell reference and recovery of synthetic distortions, and the 2026-11-22
+Kaggle pilot reproduced the frozen evaluation harness exactly. Swapping the
+core for ``xclim.sdba`` behind this same stage interface remains possible if
+a library-backed implementation is preferred.
 """
 
 from __future__ import annotations
