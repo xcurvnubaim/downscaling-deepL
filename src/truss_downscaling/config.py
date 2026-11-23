@@ -31,6 +31,8 @@ class Config:
     def scenario(self) -> dict[str, Any]: return self.raw.setdefault("scenario", {})
     @property
     def inference(self) -> dict[str, Any]: return self.raw.setdefault("inference", {})
+    @property
+    def qdm(self) -> dict[str, Any]: return self.raw.setdefault("qdm", {})
 
     @property
     def output_root(self) -> Path:

@@ -8,12 +8,13 @@ from .config import load_config
 from .evaluation import run_evaluate
 from .inference import run_infer
 from .preprocessing import run_preprocess
+from .qdm import run_finalize
 from .training import run_train
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the staged TRUSS UKESM1 to ERA5 pipeline")
-    parser.add_argument("stage", choices=("preprocess", "train", "evaluate", "infer", "run"))
+    parser.add_argument("stage", choices=("preprocess", "train", "evaluate", "infer", "finalize", "run"))
     parser.add_argument("--config", required=True)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--restart", action="store_true", help="start training from fresh weights")
@@ -38,16 +39,22 @@ def main() -> None:
         run_train(config, force=args.force, restart=args.restart)
     if args.stage in ("evaluate", "run"):
         run_evaluate(config, force=args.force)
-    if args.stage == "infer":
-        if args.input_file:
+    if args.stage in ("infer", "run"):
+        if args.stage == "infer" and args.input_file:
             config.data["gcm_file"] = str(Path(args.input_file).resolve())
-        if args.checkpoint:
+        if args.stage == "infer" and args.checkpoint:
             config.data["checkpoint"] = str(Path(args.checkpoint).resolve())
-        if args.artifact:
+        if args.stage == "infer" and args.artifact:
             checkpoint = download_wandb_checkpoint(args.artifact, args.artifact_dir or "artifacts")
             config.data["checkpoint"] = str(checkpoint)
         destination = run_infer(config, force=args.force, progress=not args.no_progress)
         print(destination.resolve())
+    if args.stage in ("finalize", "run"):
+        if args.stage == "run" and not bool(config.qdm.get("enabled", False)):
+            print("finalize skipped: qdm.enabled is false")
+        else:
+            destination = run_finalize(config, force=args.force)
+            print(destination.resolve())
 
 
 if __name__ == "__main__":

@@ -1,0 +1,36 @@
+# QDM marginal finalizer — dev-family CNN experiment (one-shot, no tuning).
+#
+# Consumes an existing CNN inference product (qdm.input_file), fits the per-cell
+# correction on 2015-2022, and applies it to every day in the file. The exam
+# years 2024-2025 are never part of the fit. Settings are fixed before the run.
+run:
+  id: qdm-devfamily
+  output_root: runs
+scenario:
+  mode: inference
+  climate_scenario: ssp245
+  member: r1i1p1f2
+data:
+  # Coarse driver grid (36 x 27): defines the SEA core mask; the edge buffer
+  # keeps raw model values.
+  gcm_file: /kaggle/input/truss-downscaling-training-data/SSP245_daily_tasmax_hurs_pr_sspgrid_036x27_SEA_2015_2025.nc
+  # Native ERA5 truth on the fine 181 x 201 grid.
+  target_grid_file: /kaggle/input/truss-downscaling-training-data/ERA5_daily_tasmax_hurs_pr_heatindex_native_025deg_SEA_2015_2025.nc
+  input_channels: [tasmax_gcm, hurs_gcm, pr_gcm]
+  target_channels: [tasmax_era5, hurs_era5, pr_era5]
+model:
+  class_path: truss_downscaling.models.residual_unet.ResidualUNet
+  parameters:
+    in_channels: 3
+    out_channels: 3
+    depth: 4
+    base_width: 64
+qdm:
+  variables: [pr]
+  # The CNN product under test. Omit input_file to finalize the newest
+  # inference output of this run instead (the full-chain mode).
+  input_file: /kaggle/input/truss-downscaling-evaluation-inputs/downscaled_ssp245_r1i1p1f2_2015_2025_eval.nc
+  fit_window: [2015-01-01, 2022-12-31]
+  wet_threshold_mm: 1.0
+  tail_clamp: true
+  time_chunk_size: 128
