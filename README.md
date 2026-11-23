@@ -209,6 +209,48 @@ default. Use `--no-progress` for logs, scripts, or other non-interactive
 execution where progress updates are not wanted. GPU metrics show `n/a` when
 NVML cannot query the selected device.
 
+## Marginal finalizer (`finalize`)
+
+The finalizer is the last operator in the chain: it corrects the per-pixel
+statistics of the CNN output against native ERA5. For each pixel it learns the
+model's own error distribution over a fit window, then applies that correction
+to every day the model produces.
+
+```bash
+truss-downscale finalize --config configs/qdm.dev-family.example.yaml
+```
+
+```yaml
+qdm:
+  variables: [pr]
+  input_file: null            # null = finalize the newest inference output
+  fit_window: [2015-01-01, 2022-12-31]
+  wet_threshold_mm: 1.0
+  tail_clamp: true
+  time_chunk_size: 128
+```
+
+- `pr` is corrected multiplicatively, wet-day occurrence is restored explicitly
+  (deterministic frequency adaptation), and tails are clamped to the fit-window
+  per-cell ERA5 maximum. `tasmax`/`hurs` are corrected additively; `hurs` is
+  clipped to `[0, 100]`.
+- Only the cells inside the coarse driver's bounding box (the SEA core) are
+  corrected; the edge buffer keeps raw model values, matching the evaluation
+  contract.
+- Every invocation writes a UTC-timestamped version under
+  `runs/<run-id>/finalize/<timestamp>/` containing the finalized NetCDF, the
+  fitted artifact `qdm_fit.npz` with its sha256, and a manifest.
+- The fitted artifact is per member and is applied unchanged to future periods;
+  no truth exists there, so the manifest records the transfer assumption
+  explicitly. Use the same artifact on both scenario sides of any comparison so
+  the correction cancels in differences.
+- Variables outside `qdm.variables` are copied unchanged. If `tasmax`/`hurs` are
+  finalized downstream, recompute Heat Index from the finalized fields.
+
+The `run` stage now chains `preprocess -> train -> evaluate -> infer ->
+finalize`; the finalize step is skipped with a notice unless `qdm.enabled` is
+true in the configuration.
+
 ## Data and preprocessing
 
 The current pipeline uses three variables:
@@ -251,6 +293,17 @@ runs/<run-id>/
     ├── figures/
     │   └── tasmax_map_input_pred_target_bias.png
     └── _SUCCESS
+```
+
+`finalize` versions additionally contain:
+
+```text
+finalize/<timestamp>/
+├── ssp245_<member>_finalized.nc
+├── qdm_fit.npz
+├── qdm_fit_manifest.json
+├── manifest.json
+└── _SUCCESS
 ```
 
 `test_metrics.csv` contains standardized RMSE, MAE, SSIM, and physical-unit
