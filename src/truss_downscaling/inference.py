@@ -17,7 +17,6 @@ import xarray as xr
 
 from .checkpointing import mark_success
 from .config import Config
-from .regridding import describe_regridding, regrid_methods_for
 from .transforms import to_physical_targets, validate_norm_stats
 
 
@@ -298,7 +297,9 @@ def run_infer(config: Config, force: bool = False, progress: bool = False) -> Pa
         prefetch_chunks = _prefetch_chunks(config)
         preload_source = bool(config.inference.get("preload_source", True))
         fill_values = np.asarray(norm.get("edge_fill_values", norm["X_mean"]), dtype="float32")
-        methods = regrid_methods_for(norm, config)
+        # Serve with the interpolation the checkpoint was trained on. Old artifacts
+        # record nothing, which means the historical default: bilinear everywhere.
+        methods = dict(norm.get("regrid_methods") or {})
         if norm.get("log1p_input_applied"):
             # edge_fill_values are stored in log1p space (preprocessing computes
             # them from the transformed training data). This fill happens before
@@ -416,7 +417,7 @@ def run_infer(config: Config, force: bool = False, progress: bool = False) -> Pa
             "cpu_workers": cpu_workers,
             "prefetch_chunks": prefetch_chunks,
             "preload_source": preload_source,
-            "regridding": describe_regridding(methods),
+            "regridding": methods,
             "precipitation_inverse_transform": "expm1_clipped_at_zero",
         },
     )

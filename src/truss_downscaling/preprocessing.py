@@ -11,7 +11,6 @@ import xarray as xr
 
 from .checkpointing import mark_success, save_json, stage_is_complete
 from .config import Config
-from .regridding import describe_regridding, resolve_regrid_methods
 
 
 def _file(config: Config, key: str) -> Path:
@@ -38,10 +37,43 @@ def _coord_name(ds: xr.Dataset, candidates: tuple[str, ...]) -> str:
     raise ValueError(f"could not find coordinate among {candidates}")
 
 
+# xESMF regridding methods this pipeline accepts for the coarse -> 0.25 deg step.
+REGRID_METHODS = ("bilinear", "conservative", "conservative_normed", "nearest_s2d", "patch")
+
+
+def _regrid_methods(config: Config) -> dict[str, str]:
+    """One xESMF method per input channel, read straight from the config.
+
+    ``preprocessing.regridding`` is the default; ``preprocessing.regridding_by_variable``
+    overrides single variables, e.g. ``pr: conservative``. Absent -> bilinear,
+    which is the historical behaviour.
+    """
+    setting = config.raw.get("preprocessing") or {}
+    default = setting.get("regridding", "bilinear")
+    overrides = setting.get("regridding_by_variable") or {}
+    methods = {}
+    for channel in config.data["input_channels"]:
+        source = channel.removesuffix("_gcm")
+        method = overrides.get(source, default)
+        if method not in REGRID_METHODS:
+            raise ValueError(
+                f"unsupported regridding method {method!r} for {source}; "
+                f"choose one of {', '.join(REGRID_METHODS)}"
+            )
+        methods[source] = method
+    unknown = sorted(set(overrides) - set(methods))
+    if unknown:
+        raise ValueError(
+            f"preprocessing.regridding_by_variable names variables that are not input "
+            f"channels: {', '.join(unknown)}"
+        )
+    return methods
+
+
 def _load_pair(config: Config) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     channels = config.data["input_channels"]
     targets = config.data["target_channels"]
-    methods = resolve_regrid_methods(config)
+    methods = _regrid_methods(config)
     try:
         import xesmf as xe
     except ImportError as error:
@@ -70,19 +102,15 @@ def _load_pair(config: Config) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
             raise ValueError("GCM and ERA5 have no common dates")
 
         regridders: dict[str, Any] = {}
-
-        def _regridder(method: str):
-            if method not in regridders:
-                regridders[method] = xe.Regridder(gcm, era5, method=method, periodic=False)
-            return regridders[method]
-
         x_values, y_values = [], []
         for channel in channels:
             source = channel.removesuffix("_gcm")
             if source not in gcm:
                 raise ValueError(f"missing GCM variable {source}")
             method = methods[source]
-            mapped = _regridder(method)(gcm[source])
+            if method not in regridders:
+                regridders[method] = xe.Regridder(gcm, era5, method=method, periodic=False)
+            mapped = regridders[method](gcm[source])
             mapped = mapped.sel({gcm_time: common}) if gcm_time in mapped.dims else mapped
             x_values.append(mapped.values.astype("float32"))
         for channel in targets:
@@ -99,7 +127,7 @@ def _load_pair(config: Config) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
         "dates": [str(v)[:10] for v in common],
         "lat": era5[lat].values.tolist(),
         "lon": era5[lon].values.tolist(),
-        "regridding": describe_regridding(methods),
+        "regridding": methods,
         "regrid_methods": methods,
     }
 

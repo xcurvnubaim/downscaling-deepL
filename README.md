@@ -246,9 +246,9 @@ driver's own intensity survives (the result is blocky). `conservative` and
 `nearest_s2d` need cell bounds, which xESMF infers from 1-D coordinates.
 
 The resolved methods are written to `metadata.json` and to
-`normalization.json` (`regrid_methods`). Inference uses the recorded methods, so
-a checkpoint is always served with the interpolation it was trained on; an
-explicit inference config that contradicts the artifact is rejected.
+`normalization.json` (`regrid_methods`). Inference uses the methods recorded
+at preprocessing time, so a checkpoint is always served with the interpolation
+it was trained on; artifacts that record nothing mean bilinear everywhere.
 
 
 ## Stage artifacts
