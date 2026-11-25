@@ -15,6 +15,15 @@ periods:
   production: [2015-01-01, 2025-12-31]
 preprocessing:
   precipitation_transform: log1p
+  # Regridding for the coarse -> 0.25 deg step (xESMF). "bilinear" (default) smooths,
+  # which preserves the mean but damps variance and both rain tails; "conservative"
+  # copies the coarse cell value so its own intensity survives (blocky, mass preserving).
+  # Other options: conservative_normed, nearest_s2d, patch.
+  regridding: bilinear
+  # Per-variable overrides win over the default. Rain is the variable where linear
+  # smoothing costs the most, so a targeted experiment changes only this one:
+  # regridding_by_variable:
+  #   pr: conservative
 model:
   class_path: truss_downscaling.models.residual_unet.ResidualUNet
   parameters:

@@ -11,6 +11,7 @@ import xarray as xr
 
 from .checkpointing import mark_success, save_json, stage_is_complete
 from .config import Config
+from .regridding import describe_regridding, resolve_regrid_methods
 
 
 def _file(config: Config, key: str) -> Path:
@@ -40,11 +41,12 @@ def _coord_name(ds: xr.Dataset, candidates: tuple[str, ...]) -> str:
 def _load_pair(config: Config) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     channels = config.data["input_channels"]
     targets = config.data["target_channels"]
+    methods = resolve_regrid_methods(config)
     try:
         import xesmf as xe
     except ImportError as error:
         raise RuntimeError(
-            "preprocessing requires xESMF bilinear regridding; install the data extra"
+            "preprocessing requires xESMF regridding; install the data extra"
         ) from error
 
     with xr.open_dataset(_file(config, "gcm_file")) as gcm, xr.open_dataset(_file(config, "era5_file")) as era5:
@@ -67,13 +69,20 @@ def _load_pair(config: Config) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
         if len(common) == 0:
             raise ValueError("GCM and ERA5 have no common dates")
 
-        regridder = xe.Regridder(gcm, era5, method="bilinear", periodic=False)
+        regridders: dict[str, Any] = {}
+
+        def _regridder(method: str):
+            if method not in regridders:
+                regridders[method] = xe.Regridder(gcm, era5, method=method, periodic=False)
+            return regridders[method]
+
         x_values, y_values = [], []
         for channel in channels:
             source = channel.removesuffix("_gcm")
             if source not in gcm:
                 raise ValueError(f"missing GCM variable {source}")
-            mapped = regridder(gcm[source])
+            method = methods[source]
+            mapped = _regridder(method)(gcm[source])
             mapped = mapped.sel({gcm_time: common}) if gcm_time in mapped.dims else mapped
             x_values.append(mapped.values.astype("float32"))
         for channel in targets:
@@ -90,7 +99,8 @@ def _load_pair(config: Config) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
         "dates": [str(v)[:10] for v in common],
         "lat": era5[lat].values.tolist(),
         "lon": era5[lon].values.tolist(),
-        "regridding": "xesmf_bilinear",
+        "regridding": describe_regridding(methods),
+        "regrid_methods": methods,
     }
 
 
@@ -156,6 +166,7 @@ def run_preprocess(config: Config, force: bool = False) -> Path:
         "edge_fill_values": x_mean.reshape(-1).tolist(),
         "target_edge_fill_values": y_mean.reshape(-1).tolist(),
         "nan_fill_policy": "training_split_channel_mean",
+        "regrid_methods": metadata.get("regrid_methods", {}),
     }
     save_json(norm, stage / "normalization.json")
     metadata.update({"shape": list(x.shape), "config": config.raw, "normalization": norm})

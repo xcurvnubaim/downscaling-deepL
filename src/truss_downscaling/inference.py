@@ -17,11 +17,13 @@ import xarray as xr
 
 from .checkpointing import mark_success
 from .config import Config
+from .regridding import describe_regridding, regrid_methods_for
 from .transforms import to_physical_targets, validate_norm_stats
 
 
 _WORKER_SOURCE: xr.Dataset | None = None
-_WORKER_REGRIDDER = None
+_WORKER_REGRIDDERS: dict[str, object] = {}
+_WORKER_METHODS: dict[str, str] = {}
 
 
 def _init_regrid_worker(
@@ -29,27 +31,32 @@ def _init_regrid_worker(
     target_grid_path: str,
     variables: list[str],
     preload_source: bool,
+    methods: dict[str, str] | None = None,
 ) -> None:
-    global _WORKER_SOURCE, _WORKER_REGRIDDER
+    global _WORKER_SOURCE, _WORKER_REGRIDDERS, _WORKER_METHODS
 
     import xesmf as xe
 
+    methods = {str(k): str(v) for k, v in (methods or {}).items()}
+    _WORKER_METHODS = {variable: methods.get(variable, "bilinear") for variable in variables}
     _WORKER_SOURCE = xr.open_dataset(source_path)[variables]
     target_grid = xr.open_dataset(target_grid_path)
     if preload_source:
         _WORKER_SOURCE.load()
         target_grid.load()
-    _WORKER_REGRIDDER = xe.Regridder(
-        _WORKER_SOURCE, target_grid, method="bilinear", periodic=False
-    )
+    _WORKER_REGRIDDERS = {
+        method: xe.Regridder(_WORKER_SOURCE, target_grid, method=method, periodic=False)
+        for method in sorted(set(_WORKER_METHODS.values()))
+    }
 
 
 def _regrid_channel(task: tuple[str, str, int, int]) -> np.ndarray:
     variable, time_name, start, stop = task
-    if _WORKER_SOURCE is None or _WORKER_REGRIDDER is None:
+    if _WORKER_SOURCE is None or not _WORKER_REGRIDDERS:
         raise RuntimeError("regridding worker is not initialized")
+    regridder = _WORKER_REGRIDDERS[_WORKER_METHODS.get(variable, "bilinear")]
     values = _WORKER_SOURCE[variable].isel({time_name: slice(start, stop)})
-    return _WORKER_REGRIDDER(values).values.astype("float32", copy=False)
+    return regridder(values).values.astype("float32", copy=False)
 
 
 def _path(config: Config, key: str) -> Path:
@@ -277,7 +284,7 @@ def run_infer(config: Config, force: bool = False, progress: bool = False) -> Pa
         import xesmf as xe
     except ImportError as error:
         raise RuntimeError(
-            "inference requires xESMF bilinear regridding; install the data extra"
+            "inference requires xESMF regridding; install the data extra"
         ) from error
 
     with xr.open_dataset(source_path) as ds, xr.open_dataset(target_grid_path) as target_grid:
@@ -291,6 +298,7 @@ def run_infer(config: Config, force: bool = False, progress: bool = False) -> Pa
         prefetch_chunks = _prefetch_chunks(config)
         preload_source = bool(config.inference.get("preload_source", True))
         fill_values = np.asarray(norm.get("edge_fill_values", norm["X_mean"]), dtype="float32")
+        methods = regrid_methods_for(norm, config)
         if norm.get("log1p_input_applied"):
             # edge_fill_values are stored in log1p space (preprocessing computes
             # them from the transformed training data). This fill happens before
@@ -323,6 +331,7 @@ def run_infer(config: Config, force: bool = False, progress: bool = False) -> Pa
                 str(target_grid_path),
                 [channel.removesuffix("_gcm") for channel in config.data["input_channels"]],
                 preload_source,
+                methods,
             ),
         )
         with pool, Dataset(destination, "a") as result:
@@ -407,7 +416,7 @@ def run_infer(config: Config, force: bool = False, progress: bool = False) -> Pa
             "cpu_workers": cpu_workers,
             "prefetch_chunks": prefetch_chunks,
             "preload_source": preload_source,
-            "regridding": "xesmf_bilinear",
+            "regridding": describe_regridding(methods),
             "precipitation_inverse_transform": "expm1_clipped_at_zero",
         },
     )
