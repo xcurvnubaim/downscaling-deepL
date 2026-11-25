@@ -1,0 +1,54 @@
+run:
+  id: production-r1-conservative-pr
+  output_root: runs
+  seed: 42
+scenario:
+  mode: production
+  climate_scenario: ssp245
+  member: r1i1p1f2
+data:
+  gcm_file: data/UKESM1_ssp245_r1i1p1f2_tasmax_hurs_pr_lowres_SEA_2015_2025.nc
+  era5_file: data/ERA5_daily_tasmax_hurs_pr_heatindex_native_025deg_SEA_2015_2025.nc
+  input_channels: [tasmax_gcm, hurs_gcm, pr_gcm]
+  target_channels: [tasmax_era5, hurs_era5, pr_era5]
+periods:
+  production: [2015-01-01, 2025-12-31]
+preprocessing:
+  precipitation_transform: log1p
+  # Experiment: rain only. Bilinear smoothing over a 36x27 neighbourhood turns heavy
+  # rain into widespread drizzle (wet-day fraction 0.612 -> 0.685, p99 49.5 -> 41.1,
+  # max 556 -> 315 mm/day on the ERA5 arm). Conservative regridding copies each coarse
+  # cell instead of averaging it, so the driver's own intensity reaches the network.
+  # tasmax and hurs stay bilinear so this run differs from the baseline in one respect.
+  regridding: bilinear
+  regridding_by_variable:
+    pr: conservative
+model:
+  class_path: truss_downscaling.models.residual_unet.ResidualUNet
+  parameters:
+    in_channels: 3
+    out_channels: 3
+    depth: 4
+    base_width: 64
+training:
+  epochs: 100
+  batch_size_per_device: 16
+  num_workers: 2
+  multi_gpu: true
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  ssim_alpha: 0.84
+  device: auto
+tracking:
+  enabled: true
+  project: truss-downscaling-v2
+  run_name: conservative-pr-r1
+  log_every_n_steps: 10
+  artifacts:
+    enabled: true
+    name: ssp245-r1-conservative-pr-model
+    type: model
+    aliases: [latest, best]
+evaluation:
+  generate_plots: true
+  map_channel: tasmax_era5

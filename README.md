@@ -225,6 +225,32 @@ computed from the training period only. Climate datasets and trained model
 checkpoints are intentionally excluded from this repository because of their
 size.
 
+### Regridding method
+
+The coarse field (`36 x 27`) is regridded onto the ERA5 grid (`181 x 201`) with
+xESMF before it reaches the network. The method is configurable:
+
+```yaml
+preprocessing:
+  regridding: bilinear              # default; smooth, mean preserving
+  regridding_by_variable:           # per-variable overrides win
+    pr: conservative
+```
+
+Supported methods are `bilinear`, `conservative`, `conservative_normed`,
+`nearest_s2d`, and `patch`. `bilinear` preserves the mean but damps variance and
+both tails; on ERA5 rain it lifts the wet-day fraction from 0.612 to 0.685 while
+cutting p99 from 49.5 to 41.1 and the daily maximum from 556 to 315 mm/day.
+`conservative` copies each coarse cell to the target cells it covers, so the
+driver's own intensity survives (the result is blocky). `conservative` and
+`nearest_s2d` need cell bounds, which xESMF infers from 1-D coordinates.
+
+The resolved methods are written to `metadata.json` and to
+`normalization.json` (`regrid_methods`). Inference uses the methods recorded
+at preprocessing time, so a checkpoint is always served with the interpolation
+it was trained on; artifacts that record nothing mean bilinear everywhere.
+
+
 ## Stage artifacts
 
 Each run stores artifacts under `runs/<run-id>/`:
